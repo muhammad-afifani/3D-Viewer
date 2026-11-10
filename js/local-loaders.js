@@ -1004,19 +1004,31 @@ export function getFreeAutodeskViewerExtractorScript() {
   }
   const model = v.model;
   const fragList = model.getFragmentList();
-  const tree = model.getInstanceTree();
+  const tree = model.getInstanceTree ? model.getInstanceTree() : null;
   const count = fragList.getCount();
   const meshes = [];
   const mat4 = new window.THREE.Matrix4();
   const vec3 = new window.THREE.Vector3();
+
+  // Helper mengambil dbId untuk setiap fragId
+  const frag2dbId = fragList.fragments?.fragId2dbId || (fragList.getFragIdToDbIdMap ? fragList.getFragIdToDbIdMap() : null);
 
   for (let fragId = 0; fragId < count; fragId++) {
     const vizmesh = fragList.getVizmesh(fragId);
     if (!vizmesh || !vizmesh.geometry) continue;
     const geom = vizmesh.geometry;
     fragList.getWorldMatrix(fragId, mat4);
-    const dbId = fragList.getDbId(fragId);
-    const name = (tree && tree.getNodeName(dbId)) || ("Component_" + dbId);
+
+    let dbId = frag2dbId ? frag2dbId[fragId] : (fragList.getDbIds ? fragList.getDbIds(fragId) : fragId);
+    if (Array.isArray(dbId)) dbId = dbId[0];
+    if (typeof dbId !== 'number') dbId = fragId;
+
+    let name = "Component_" + dbId;
+    if (tree && typeof tree.getNodeName === 'function') {
+      try {
+        name = tree.getNodeName(dbId) || name;
+      } catch(e){}
+    }
 
     let posOut = [];
     if (geom.vb && geom.vbstride) {
@@ -1043,7 +1055,7 @@ export function getFreeAutodeskViewerExtractorScript() {
 
     let colorHex = 0x38bdf8;
     const mat = fragList.getMaterial(fragId);
-    if (mat && mat.color) {
+    if (mat && mat.color && typeof mat.color.getHex === 'function') {
       colorHex = mat.color.getHex();
     }
 
