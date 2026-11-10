@@ -588,340 +588,204 @@ export function parseStlBuffer(arrayBuffer, fileName) {
 
 /**
  * ============================================================================
- * 4. PARSER FORMAT .IFC (Industry Foundation Classes — STEP Physical File)
- *    Mengekstrak objek BIM (IfcPipeSegment, IfcWall, IfcBeam, IfcColumn,
- *    IfcEquipmentElement, dll) beserta geometri 3D (IfcFacetedBrep,
- *    IfcTriangulatedFaceSet, IfcPolygonalFaceSet, IfcExtrudedAreaSolid)
- *    dan metadata propertinya secara 100% lokal di browser!
+ * 4. PARSER FORMAT .IFC (Industry Foundation Classes — WebAssembly Web-IFC)
+ *    Menggunakan engine C++ WebAssembly resmi `web-ifc` (`./vendor/web-ifc-api.js`
+ *    & `./vendor/web-ifc.wasm`) untuk mengekstrak seluruh geometri CSG/Boolean,
+ *    SweptDiskSolid (pipa), RevolvedAreaSolid, ExtrudedAreaSolid, Brep,
+ *    serta mentransformasikannya dengan matriks rotasi + translasi 4x4 dan
+ *    `COORDINATE_TO_ORIGIN: true` (bebas dari artefak floating-point jitter!).
  * ============================================================================
  */
-export function parseIfcBuffer(arrayBuffer, fileName) {
-  const text = new TextDecoder().decode(new Uint8Array(arrayBuffer));
-  const entities = new Map();
+let webIfcApiSingleton = null;
 
-  // Ekstrak seluruh baris entitas STEP: #123 = IFCENTITYNAME(args...);
-  const stepRegex = /#(\d+)\s*=\s*([A-Z0-9_]+)\s*\(([\s\S]*?)\)\s*;/g;
-  let match;
-  while ((match = stepRegex.exec(text)) !== null) {
-    entities.set(Number(match[1]), {
-      id: Number(match[1]),
-      type: match[2],
-      rawArgs: match[3].trim()
-    });
+async function getInitializedWebIfcApi() {
+  if (webIfcApiSingleton) return webIfcApiSingleton;
+
+  const WebIFC = await import('./vendor/web-ifc-api.js');
+  const api = new WebIFC.IfcAPI();
+
+  // Gunakan URL absolut ke ./js/vendor/web-ifc.wasm agar aman di sub-path GitHub Pages maupun localhost
+  const wasmDirUrl = new URL('./vendor/', import.meta.url).href;
+  await api.Init((path) => {
+    if (path.endsWith('.wasm')) {
+      return new URL(path, wasmDirUrl).href;
+    }
+    return path;
+  });
+
+  webIfcApiSingleton = api;
+  return api;
+}
+
+export async function parseIfcBuffer(arrayBuffer, fileName) {
+  const ifcApi = await getInitializedWebIfcApi();
+  const uint8Data = new Uint8Array(arrayBuffer);
+
+  // Buka model IFC dengan COORDINATE_TO_ORIGIN: true agar koordinat proyek besar
+  // otomatis dipusatkan ke (0,0,0) dan mencegah mesh pecah/bergaris di WebGL!
+  const modelID = ifcApi.OpenModel(uint8Data, {
+    COORDINATE_TO_ORIGIN: true,
+    CIRCLE_SEGMENTS: 16
+  });
+
+  if (modelID === -1) {
+    throw new Error('Gagal membuka file IFC (skema tidak didukung atau file rusak).');
   }
-
-  if (entities.size === 0) {
-    throw new Error('File IFC tidak valid (format STEP ISO-10303-21 tidak terdeteksi).');
-  }
-
-  // Helper mengambil koordinat dari IFCCARTESIANPOINT((x,y,z))
-  const pointCache = new Map();
-  function getPoint(id) {
-    if (pointCache.has(id)) return pointCache.get(id);
-    const ent = entities.get(id);
-    if (!ent || ent.type !== 'IFCCARTESIANPOINT') return [0, 0, 0];
-    const m = ent.rawArgs.match(/\(\s*([+-]?\d*\.?\d+(?:[eE][+-]?\d+)?)\s*,\s*([+-]?\d*\.?\d+(?:[eE][+-]?\d+)?)\s*(?:,\s*([+-]?\d*\.?\d+(?:[eE][+-]?\d+)?))?\s*\)/);
-    const pt = m
-      ? [parseFloat(m[1]) || 0, parseFloat(m[2]) || 0, parseFloat(m[3]) || 0]
-      : [0, 0, 0];
-    pointCache.set(id, pt);
-    return pt;
-  }
-
-  function getDirection(id, fallback = [0, 0, 1]) {
-    const ent = entities.get(id);
-    if (!ent || ent.type !== 'IFCDIRECTION') return fallback;
-    const m = ent.rawArgs.match(/\(\s*([+-]?\d*\.?\d+(?:[eE][+-]?\d+)?)\s*,\s*([+-]?\d*\.?\d+(?:[eE][+-]?\d+)?)\s*(?:,\s*([+-]?\d*\.?\d+(?:[eE][+-]?\d+)?))?\s*\)/);
-    return m
-      ? [parseFloat(m[1]) || 0, parseFloat(m[2]) || 0, parseFloat(m[3]) || 0]
-      : fallback;
-  }
-
-  // Resolusi IFCLOCALPLACEMENT -> translasi dunia [x, y, z]
-  function resolvePlacementOrigin(placementId, depth = 0) {
-    if (!placementId || depth > 12) return [0, 0, 0];
-    const ent = entities.get(placementId);
-    if (!ent) return [0, 0, 0];
-
-    if (ent.type === 'IFCLOCALPLACEMENT') {
-      const refs = Array.from(ent.rawArgs.matchAll(/#(\d+)/g)).map((m) => Number(m[1]));
-      const parentOrigin = refs.length > 1 ? resolvePlacementOrigin(refs[0], depth + 1) : [0, 0, 0];
-      const relAxisId = refs.length > 1 ? refs[1] : refs[0];
-      const relOrigin = resolvePlacementOrigin(relAxisId, depth + 1);
-      return [
-        parentOrigin[0] + relOrigin[0],
-        parentOrigin[1] + relOrigin[1],
-        parentOrigin[2] + relOrigin[2]
-      ];
-    }
-
-    if (ent.type === 'IFCAXIS2PLACEMENT3D' || ent.type === 'IFCAXIS2PLACEMENT2D') {
-      const firstRef = ent.rawArgs.match(/#(\d+)/);
-      if (firstRef) {
-        return getPoint(Number(firstRef[1]));
-      }
-    }
-    return [0, 0, 0];
-  }
-
-  // Ekstraksi segitiga dari berbagai representasi geometri IFC
-  function extractGeometryTriangles(geomId, offset = [0, 0, 0], visited = new Set()) {
-    if (!geomId || visited.has(geomId)) return [];
-    visited.add(geomId);
-    const ent = entities.get(geomId);
-    if (!ent) return [];
-
-    const triangles = [];
-
-    // 1. IFCTRIANGULATEDFACESET (IFC4)
-    if (ent.type === 'IFCTRIANGULATEDFACESET') {
-      const coordRef = ent.rawArgs.match(/#(\d+)/);
-      if (coordRef) {
-        const coordEnt = entities.get(Number(coordRef[1]));
-        if (coordEnt && coordEnt.type === 'IFCCARTESIANPOINTLIST3D') {
-          const pts = [];
-          const ptMatches = coordEnt.rawArgs.matchAll(
-            /\(\s*([+-]?\d*\.?\d+(?:[eE][+-]?\d+)?)\s*,\s*([+-]?\d*\.?\d+(?:[eE][+-]?\d+)?)\s*,\s*([+-]?\d*\.?\d+(?:[eE][+-]?\d+)?)\s*\)/g
-          );
-          for (const pm of ptMatches) {
-            pts.push([
-              parseFloat(pm[1]) + offset[0],
-              parseFloat(pm[2]) + offset[1],
-              parseFloat(pm[3]) + offset[2]
-            ]);
-          }
-          // Ambil daftar indeks segitiga (1-based)
-          const idxSection = ent.rawArgs.split(/\.[TF]\./i)[1] || ent.rawArgs;
-          const triMatches = idxSection.matchAll(/\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)/g);
-          for (const tm of triMatches) {
-            const p0 = pts[Number(tm[1]) - 1];
-            const p1 = pts[Number(tm[2]) - 1];
-            const p2 = pts[Number(tm[3]) - 1];
-            if (p0 && p1 && p2) {
-              triangles.push(...p0, ...p1, ...p2);
-            }
-          }
-        }
-      }
-      return triangles;
-    }
-
-    // 2. IFCFACETEDBREP / IFCSHELLBASEDSURFACEMODEL / IFCFACEBASEDSURFACEMODEL / IFCCLOSEDSHELL / IFCOPENSHELL
-    if (
-      ent.type === 'IFCFACETEDBREP' ||
-      ent.type === 'IFCSHELLBASEDSURFACEMODEL' ||
-      ent.type === 'IFCFACEBASEDSURFACEMODEL' ||
-      ent.type === 'IFCCLOSEDSHELL' ||
-      ent.type === 'IFCOPENSHELL' ||
-      ent.type === 'IFCFACE' ||
-      ent.type === 'IFCFACEOUTERBOUND' ||
-      ent.type === 'IFCFACEBOUND'
-    ) {
-      const refs = Array.from(ent.rawArgs.matchAll(/#(\d+)/g)).map((m) => Number(m[1]));
-      for (const rId of refs) {
-        const sub = extractGeometryTriangles(rId, offset, visited);
-        for (let i = 0; i < sub.length; i++) triangles.push(sub[i]);
-      }
-      return triangles;
-    }
-
-    // 3. IFCPOLYLOOP
-    if (ent.type === 'IFCPOLYLOOP') {
-      const ptIds = Array.from(ent.rawArgs.matchAll(/#(\d+)/g)).map((m) => Number(m[1]));
-      if (ptIds.length >= 3) {
-        const p0 = getPoint(ptIds[0]);
-        for (let i = 1; i < ptIds.length - 1; i++) {
-          const p1 = getPoint(ptIds[i]);
-          const p2 = getPoint(ptIds[i + 1]);
-          triangles.push(
-            p0[0] + offset[0],
-            p0[1] + offset[1],
-            p0[2] + offset[2],
-            p1[0] + offset[0],
-            p1[1] + offset[1],
-            p1[2] + offset[2],
-            p2[0] + offset[0],
-            p2[1] + offset[1],
-            p2[2] + offset[2]
-          );
-        }
-      }
-      return triangles;
-    }
-
-    // 4. IFCEXTRUDEDAREASOLID (Sangat umum untuk Pipa, Kolom, Balok, Dinding, Slab)
-    if (ent.type === 'IFCEXTRUDEDAREASOLID') {
-      const refs = Array.from(ent.rawArgs.matchAll(/#(\d+)/g)).map((m) => Number(m[1]));
-      const nums = Array.from(
-        ent.rawArgs.replace(/#\d+/g, '').matchAll(/([+-]?\d*\.?\d+(?:[eE][+-]?\d+)?)/g)
-      ).map((m) => parseFloat(m[1]));
-      const depth = nums.length > 0 ? Math.max(0.1, nums[nums.length - 1]) : 2.0;
-
-      const profileEnt = entities.get(refs[0]);
-      const posOrigin = refs[1] ? resolvePlacementOrigin(refs[1]) : [0, 0, 0];
-      const dirVec = refs[2] ? getDirection(refs[2], [0, 0, 1]) : [0, 0, 1];
-
-      const ox = offset[0] + posOrigin[0];
-      const oy = offset[1] + posOrigin[1];
-      const oz = offset[2] + posOrigin[2];
-
-      const dx = dirVec[0] * depth;
-      const dy = dirVec[1] * depth;
-      const dz = dirVec[2] * depth;
-
-      let loop2D = [];
-
-      if (profileEnt && profileEnt.type === 'IFCCIRCLEPROFILEDEF') {
-        const pNums = Array.from(
-          profileEnt.rawArgs.replace(/#\d+/g, '').matchAll(/([+-]?\d*\.?\d+(?:[eE][+-]?\d+)?)/g)
-        ).map((m) => parseFloat(m[1]));
-        const radius = pNums.length > 0 ? Math.max(0.05, pNums[pNums.length - 1]) : 0.3;
-        const segs = 14;
-        for (let s = 0; s < segs; s++) {
-          const ang = (s / segs) * Math.PI * 2;
-          loop2D.push([Math.cos(ang) * radius, Math.sin(ang) * radius]);
-        }
-      } else {
-        // Default persegi panjang (IFCRECTANGLEPROFILEDEF / IFCSIMPLEPROFILE)
-        let xDim = 1.0,
-          yDim = 1.0;
-        if (profileEnt) {
-          const pNums = Array.from(
-            profileEnt.rawArgs.replace(/#\d+/g, '').matchAll(/([+-]?\d*\.?\d+(?:[eE][+-]?\d+)?)/g)
-          ).map((m) => parseFloat(m[1]));
-          if (pNums.length >= 2) {
-            xDim = Math.max(0.05, pNums[pNums.length - 2]);
-            yDim = Math.max(0.05, pNums[pNums.length - 1]);
-          }
-        }
-        const hx = xDim / 2,
-          hy = yDim / 2;
-        loop2D = [
-          [-hx, -hy],
-          [hx, -hy],
-          [hx, hy],
-          [-hx, hy]
-        ];
-      }
-
-      // Bangun sisi ekstrusi + tutup atas & bawah
-      const n = loop2D.length;
-      for (let i = 0; i < n; i++) {
-        const [x0, y0] = loop2D[i];
-        const [x1, y1] = loop2D[(i + 1) % n];
-
-        const b0 = [ox + x0, oy + y0, oz];
-        const b1 = [ox + x1, oy + y1, oz];
-        const t1 = [ox + x1 + dx, oy + y1 + dy, oz + dz];
-        const t0 = [ox + x0 + dx, oy + y0 + dy, oz + dz];
-
-        triangles.push(...b0, ...b1, ...t1, ...b0, ...t1, ...t0);
-      }
-
-      // Tutup bawah & atas
-      const bFirst = [ox + loop2D[0][0], oy + loop2D[0][1], oz];
-      const tFirst = [ox + loop2D[0][0] + dx, oy + loop2D[0][1] + dy, oz + dz];
-      for (let i = 1; i < n - 1; i++) {
-        const bA = [ox + loop2D[i][0], oy + loop2D[i][1], oz];
-        const bB = [ox + loop2D[i + 1][0], oy + loop2D[i + 1][1], oz];
-        triangles.push(...bFirst, ...bB, ...bA);
-
-        const tA = [ox + loop2D[i][0] + dx, oy + loop2D[i][1] + dy, oz + dz];
-        const tB = [ox + loop2D[i + 1][0] + dx, oy + loop2D[i + 1][1] + dy, oz + dz];
-        triangles.push(...tFirst, ...tA, ...tB);
-      }
-
-      return triangles;
-    }
-
-    // 5. Telusuri sub-referensi (IFCPRODUCTDEFINITIONSHAPE, IFCSHAPEREPRESENTATION, IFCMAPPEDITEM, dll)
-    const childRefs = Array.from(ent.rawArgs.matchAll(/#(\d+)/g)).map((m) => Number(m[1]));
-    for (const cId of childRefs) {
-      const subTris = extractGeometryTriangles(cId, offset, visited);
-      for (let i = 0; i < subTris.length; i++) triangles.push(subTris[i]);
-    }
-    return triangles;
-  }
-
-  // Warna berdasarkan kelas elemen IFC
-  const ifcColorMap = {
-    IFCPIPESEGMENT: 0xef4444,
-    IFCPIPEFITTING: 0xf97316,
-    IFCFLOWTERMINAL: 0x10b981,
-    IFCFLOWCONTROLLER: 0xec4899,
-    IFCFLOWMOVINGDEVICE: 0xf59e0b,
-    IFCWALL: 0x94a3b8,
-    IFCWALLSTANDARDCASE: 0x94a3b8,
-    IFCSLAB: 0x64748b,
-    IFCBEAM: 0x38bdf8,
-    IFCCOLUMN: 0x0ea5e9,
-    IFCFOOTING: 0x475569
-  };
 
   const items = [];
 
-  for (const ent of entities.values()) {
-    // Cek apakah entitas merupakan elemen produk 3D IFC (memiliki GlobalId di awal argumen)
-    if (
-      !ent.type.startsWith('IFC') ||
-      ent.type.startsWith('IFCREL') ||
-      ent.type.startsWith('IFCPROPERTY') ||
-      ent.type.startsWith('IFCCARTESIAN') ||
-      ent.type.startsWith('IFCDIRECTION') ||
-      ent.type.startsWith('IFCAXIS') ||
-      ent.type.startsWith('IFCLOCAL') ||
-      ent.type.startsWith('IFCSHAPE') ||
-      ent.type.startsWith('IFCPRODUCTDEFINITION')
-    ) {
-      continue;
-    }
+  try {
+    ifcApi.StreamAllMeshes(modelID, (flatMesh) => {
+      const expressID = flatMesh.expressID;
+      const placedGeometries = flatMesh.geometries;
+      const geomCount = placedGeometries.size();
+      if (geomCount === 0) return;
 
-    const refs = Array.from(ent.rawArgs.matchAll(/#(\d+)/g)).map((m) => Number(m[1]));
-    if (refs.length < 2) continue;
+      // Gabungkan seluruh sub-geometri milik elemen BIM (expressID) ini
+      const posChunks = [];
+      const normChunks = [];
+      let totalVerticesFloats = 0;
+      let primaryColorHex = 0x38bdf8;
+      let hasColor = false;
 
-    // Cari referensi IFCPRODUCTDEFINITIONSHAPE
-    const shapeRepId = refs.find((r) => entities.get(r)?.type === 'IFCPRODUCTDEFINITIONSHAPE');
-    if (!shapeRepId) continue;
+      for (let i = 0; i < geomCount; i++) {
+        const placed = placedGeometries.get(i);
+        const geom = ifcApi.GetGeometry(modelID, placed.geometryExpressID);
+        const vPtr = geom.GetVertexData();
+        const vSize = geom.GetVertexDataSize();
+        const iPtr = geom.GetIndexData();
+        const iSize = geom.GetIndexDataSize();
 
-    const placementId = refs.find((r) => entities.get(r)?.type === 'IFCLOCALPLACEMENT');
-    const origin = placementId ? resolvePlacementOrigin(placementId) : [0, 0, 0];
+        if (vSize === 0 || iSize === 0) {
+          geom.delete();
+          continue;
+        }
 
-    const tris = extractGeometryTriangles(shapeRepId, origin, new Set());
-    if (tris.length < 9) continue;
+        // Interleaved buffer dari web-ifc: [px, py, pz, nx, ny, nz] (6 float per vertex)
+        const verts = ifcApi.GetVertexArray(vPtr, vSize);
+        const indices = ifcApi.GetIndexArray(iPtr, iSize);
+        const m = placed.flatTransformation; // Matriks 4x4 column-major
 
-    // Ambil string argumen (GlobalId, Name, Description, Tag)
-    const strMatches = Array.from(ent.rawArgs.matchAll(/'([^']*)'/g)).map((m) => m[1]);
-    const globalId = strMatches[0] || `IFC_${ent.id}`;
-    const elemName = strMatches[1] || `${ent.type} #${ent.id}`;
-    const elemDesc = strMatches[2] || '';
+        // Warna material RGBA dari IFC
+        if (!hasColor && placed.color) {
+          const r = Math.round(Math.min(1, Math.max(0, placed.color.x)) * 255);
+          const g = Math.round(Math.min(1, Math.max(0, placed.color.y)) * 255);
+          const b = Math.round(Math.min(1, Math.max(0, placed.color.z)) * 255);
+          if (r > 5 || g > 5 || b > 5) {
+            primaryColorHex = (r << 16) | (g << 8) | b;
+            hasColor = true;
+          }
+        }
 
-    const positions = new Float32Array(tris);
-    const normals = computeVertexNormals(positions, null);
+        const subPos = new Float32Array(indices.length * 3);
+        const subNorm = new Float32Array(indices.length * 3);
 
-    items.push({
-      name: `${elemName} [${ent.type}]`,
-      category: ent.type,
-      system: 'IFC OpenBIM Model',
-      materialName: `IFC ${ent.type} Material`,
-      colorHex: ifcColorMap[ent.type] || 0x38bdf8,
-      positions,
-      normals,
-      indices: null,
-      specs: {
-        'IFC Entity': ent.type,
-        'STEP ID': `#${ent.id}`,
-        GlobalId: globalId,
-        Name: elemName,
-        Description: elemDesc || '-',
-        Triangles: String(Math.floor(positions.length / 9))
+        for (let k = 0; k < indices.length; k++) {
+          const vBase = indices[k] * 6;
+          const vx = verts[vBase] || 0;
+          const vy = verts[vBase + 1] || 0;
+          const vz = verts[vBase + 2] || 0;
+
+          const nx = verts[vBase + 3] || 0;
+          const ny = verts[vBase + 4] || 0;
+          const nz = verts[vBase + 5] || 1;
+
+          // Transformasi posisi vertex dengan matriks 4x4 (m)
+          const tx = m[0] * vx + m[4] * vy + m[8] * vz + m[12];
+          const ty = m[1] * vx + m[5] * vy + m[9] * vz + m[13];
+          const tz = m[2] * vx + m[6] * vy + m[10] * vz + m[14];
+
+          // Transformasi arah normal dengan matriks rotasi 3x3
+          let tnx = m[0] * nx + m[4] * ny + m[8] * nz;
+          let tny = m[1] * nx + m[5] * ny + m[9] * nz;
+          let tnz = m[2] * nx + m[6] * ny + m[10] * nz;
+          const nLen = Math.hypot(tnx, tny, tnz) || 1;
+          tnx /= nLen;
+          tny /= nLen;
+          tnz /= nLen;
+
+          const outIdx = k * 3;
+          subPos[outIdx] = tx;
+          subPos[outIdx + 1] = ty;
+          subPos[outIdx + 2] = tz;
+
+          subNorm[outIdx] = tnx;
+          subNorm[outIdx + 1] = tny;
+          subNorm[outIdx + 2] = tnz;
+        }
+
+        posChunks.push(subPos);
+        normChunks.push(subNorm);
+        totalVerticesFloats += subPos.length;
+        geom.delete();
       }
+
+      if (totalVerticesFloats < 9) return;
+
+      const mergedPos = new Float32Array(totalVerticesFloats);
+      const mergedNorm = new Float32Array(totalVerticesFloats);
+      let offset = 0;
+      for (let c = 0; c < posChunks.length; c++) {
+        mergedPos.set(posChunks[c], offset);
+        mergedNorm.set(normChunks[c], offset);
+        offset += posChunks[c].length;
+      }
+
+      // Ambil metadata BIM (Name, GlobalId, ObjectType, Tag, Description) dari baris STEP
+      let elemName = `IFC Element #${expressID}`;
+      let entityTypeName = 'IFC Product';
+      let globalId = `EXP_${expressID}`;
+      let objectType = '-';
+      let tagVal = '-';
+      let descVal = '-';
+
+      try {
+        const typeCode = ifcApi.GetLineType(modelID, expressID);
+        if (typeCode) {
+          entityTypeName = ifcApi.GetNameFromTypeCode(typeCode) || entityTypeName;
+        }
+        const lineData = ifcApi.GetLine(modelID, expressID, false);
+        if (lineData) {
+          if (lineData.Name?.value) elemName = String(lineData.Name.value);
+          else if (lineData.LongName?.value) elemName = String(lineData.LongName.value);
+          else elemName = `${entityTypeName} #${expressID}`;
+
+          if (lineData.GlobalId?.value) globalId = String(lineData.GlobalId.value);
+          if (lineData.ObjectType?.value) objectType = String(lineData.ObjectType.value);
+          if (lineData.Tag?.value) tagVal = String(lineData.Tag.value);
+          if (lineData.Description?.value) descVal = String(lineData.Description.value);
+        }
+      } catch {
+        // Abaikan jika properti opsional tidak tersedia pada elemen tertentu
+      }
+
+      items.push({
+        name: `${elemName} [${entityTypeName}]`,
+        category: entityTypeName,
+        system: fileName,
+        materialName: `IFC ${entityTypeName}`,
+        colorHex: primaryColorHex,
+        positions: mergedPos,
+        normals: mergedNorm,
+        indices: null,
+        specs: {
+          'Item Name': elemName,
+          'IFC Class': entityTypeName,
+          'Express ID': `#${expressID}`,
+          GlobalId: globalId,
+          'Object Type': objectType,
+          Tag: tagVal,
+          Description: descVal,
+          Triangles: String(Math.floor(totalVerticesFloats / 9))
+        }
+      });
     });
+  } finally {
+    ifcApi.CloseModel(modelID);
   }
 
   if (items.length === 0) {
-    throw new Error(
-      'Tidak ditemukan geometri elemen 3D yang didukung di file IFC ini. Anda dapat mengonversinya terlebih dahulu ke .GLB atau .OBJ.'
-    );
+    throw new Error('Tidak ditemukan geometri 3D di dalam file IFC ini.');
   }
 
   return items;

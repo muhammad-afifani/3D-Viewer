@@ -349,6 +349,12 @@ async function refreshOfflineLibraryUI() {
       } else if (m.source === 'zip') {
         badgeClass = 'badge-cloud';
         badgeLabel = 'ZIP PACKAGE';
+      } else if (
+        m.source === 'local3d' ||
+        /\.(ifc|glb|gltf|obj|stl|nwdjson)$/i.test(String(m.name || ''))
+      ) {
+        badgeClass = 'badge-offline';
+        badgeLabel = 'LOCAL 3D / BIM';
       }
 
       return `
@@ -548,15 +554,13 @@ async function handleNwdCloudToOfflinePipeline(file) {
   // Jika file adalah format 3D lokal (.ifc, .glb, .gltf, .obj, .stl, .nwdjson, .zip),
   // proses langsung secara 100% Offline tanpa memerlukan kredensial APS!
   const lowerName = String(file.name || '').toLowerCase();
-  const creds = getActiveApsCredentials();
-  if (
-    /\.(ifc|glb|gltf|obj|stl|nwdjson|zip)$/i.test(lowerName) &&
-    (!creds.clientId || !creds.clientSecret)
-  ) {
+  if (/\.(ifc|glb|gltf|obj|stl|nwdjson|zip)$/i.test(lowerName)) {
     switchSidebarTab('tabLibrary');
     await handleImportZipPackage(file);
     return;
   }
+
+  const creds = getActiveApsCredentials();
 
   if (!creds.clientId || !creds.clientSecret) {
     showToast(

@@ -12,15 +12,15 @@
  *    langsung dari IndexedDB (NWDViewerOfflineDB).
  */
 
-const CACHE_SHELL = 'nwd-viewer-shell-v2';
-const CACHE_SDK = 'nwd-viewer-sdk-v2';
+const CACHE_SHELL = 'nwd-viewer-shell-v4';
+const CACHE_SDK = 'nwd-viewer-sdk-v4';
 
 const DB_NAME = 'NWDViewerOfflineDB';
 const DB_VERSION = 1;
 const STORE_MODELS = 'models';
 const STORE_FILES = 'files';
 
-// Daftar file inti aplikasi lokal
+// Daftar file inti aplikasi lokal (termasuk engine WebAssembly IFC)
 const APP_SHELL_FILES = [
   './',
   './index.html',
@@ -31,7 +31,9 @@ const APP_SHELL_FILES = [
   './js/aps-client.js',
   './js/local-loaders.js',
   './js/storage.js',
-  './js/viewer.js'
+  './js/viewer.js',
+  './js/vendor/web-ifc-api.js',
+  './js/vendor/web-ifc.wasm'
 ];
 
 // Daftar file inti SDK Autodesk Viewer v7 & JSZip yang di-cache untuk mode 100% Offline

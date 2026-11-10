@@ -194,9 +194,17 @@ export async function loadOfflineModel(modelRecord, container, onSelectionChange
   }
 
   // 2. Jika model adalah Direct Local 3D/BIM File (.IFC, .GLB, .GLTF, .OBJ, .STL, .NWDJSON)
-  if (modelRecord.source === 'local3d' || String(modelRecord.svfPath).startsWith('local3d://')) {
-    const storedFilePath = String(modelRecord.svfPath).replace(/^local3d:\/\//, '');
-    const fileRecord = await getModelFile(modelRecord.id, storedFilePath);
+  const isLocal3DByExt = /\.(ifc|glb|gltf|obj|stl|nwdjson)$/i.test(String(modelRecord.name || ''));
+  if (
+    modelRecord.source === 'local3d' ||
+    String(modelRecord.svfPath || '').startsWith('local3d://') ||
+    isLocal3DByExt
+  ) {
+    const storedFilePath = String(modelRecord.svfPath || modelRecord.name).replace(/^local3d:\/\//, '');
+    let fileRecord = await getModelFile(modelRecord.id, storedFilePath);
+    if ((!fileRecord || !fileRecord.data) && modelRecord.name) {
+      fileRecord = await getModelFile(modelRecord.id, modelRecord.name);
+    }
     if (!fileRecord || !fileRecord.data) {
       throw new Error(`File 3D lokal "${storedFilePath}" tidak ditemukan di IndexedDB.`);
     }
@@ -248,6 +256,8 @@ export async function loadOfflineModel(modelRecord, container, onSelectionChange
 /**
  * Membangun scene 3D di dalam Autodesk GuiViewer3D dari hasil parsing file lokal
  * (.IFC, .GLB, .GLTF, .OBJ, .STL, atau .NWDJSON hasil ekstraksi viewer.autodesk.com).
+ * Dilengkapi Auto-Centering Bounding Box & 16-bit Index Chunking (<= 54.000 vertex per mesh)
+ * agar tidak terjadi garis-garis/spiky artifact pada model 3D berukuran besar.
  */
 async function buildCustomParsedMeshScene(viewer, modelName, meshItems) {
   const ext = await viewer.loadExtension('Autodesk.Viewing.SceneBuilder');
@@ -259,11 +269,19 @@ async function buildCustomParsedMeshScene(viewer, modelName, meshItems) {
   const THREE = window.THREE;
   customDemoMetadataMap.clear();
 
+  // Tahap 1: Siapkan geometri non-indexed dan hitung Global Bounding Box untuk Auto-Centering
+  const preparedMeshes = [];
+  let minX = Infinity;
+  let minY = Infinity;
+  let minZ = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  let maxZ = -Infinity;
+
   for (let i = 0; i < meshItems.length; i++) {
     const item = meshItems[i];
     if (!item.positions || item.positions.length < 9) continue;
 
-    // Jika memiliki index buffer, ekspansi ke non-indexed segitiga atau bangun THREE.BufferGeometry
     let posFloats = item.positions;
     let normFloats = item.normals;
 
@@ -277,51 +295,128 @@ async function buildCustomParsedMeshScene(viewer, modelName, meshItems) {
         expandedPos[k * 3 + 2] = posFloats[vi + 2] || 0;
       }
       posFloats = expandedPos;
-      normFloats = computeVertexNormals(posFloats, null);
-    } else if (!normFloats || normFloats.length !== posFloats.length) {
-      normFloats = computeVertexNormals(posFloats, null);
+      normFloats = null;
     }
 
-    const bufGeom = new THREE.BufferGeometry();
-    const posAttr = new THREE.BufferAttribute(posFloats, 3);
-    const normAttr = new THREE.BufferAttribute(normFloats, 3);
+    // Pastikan kelipatan 9 float (1 segitiga = 3 vertex = 9 float) dan bebas NaN/Infinity
+    const validFloatLen = Math.floor(posFloats.length / 9) * 9;
+    if (validFloatLen < 9) continue;
 
-    if (typeof bufGeom.addAttribute === 'function') {
-      bufGeom.addAttribute('position', posAttr);
-      bufGeom.addAttribute('normal', normAttr);
-    } else if (typeof bufGeom.setAttribute === 'function') {
-      bufGeom.setAttribute('position', posAttr);
-      bufGeom.setAttribute('normal', normAttr);
-    }
-
-    bufGeom.computeBoundingBox();
-    bufGeom.computeBoundingSphere();
-
-    const matKey = `mat_${i}_${item.colorHex || 0x38bdf8}`;
-    const mat = new THREE.MeshPhongMaterial({
-      color: new THREE.Color(item.colorHex || 0x38bdf8),
-      specular: new THREE.Color(0x334155),
-      shininess: 38,
-      side: THREE.DoubleSide
-    });
-    modelBuilder.addMaterial(matKey, mat);
-
-    const mesh = new THREE.Mesh(bufGeom, mat);
-    mesh.matrixAutoUpdate = false;
-    mesh.updateMatrix();
-
-    const dbId = modelBuilder.addMesh(mesh);
-    customDemoMetadataMap.set(dbId, {
-      dbId,
-      name: item.name || `Component #${i + 1}`,
-      category: item.category || '3D Element',
-      system: item.system || modelName,
-      material: item.materialName || 'CAD Material',
-      specs: item.specs || {
-        'Element Name': item.name || `Component #${i + 1}`,
-        Triangles: String(Math.floor(posFloats.length / 9))
+    for (let j = 0; j < validFloatLen; j += 3) {
+      const x = posFloats[j];
+      const y = posFloats[j + 1];
+      const z = posFloats[j + 2];
+      if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) {
+        posFloats[j] = 0;
+        posFloats[j + 1] = 0;
+        posFloats[j + 2] = 0;
+        continue;
       }
+      if (x < minX) minX = x;
+      if (y < minY) minY = y;
+      if (z < minZ) minZ = z;
+      if (x > maxX) maxX = x;
+      if (y > maxY) maxY = y;
+      if (z > maxZ) maxZ = z;
+    }
+
+    preparedMeshes.push({
+      item,
+      posFloats: validFloatLen === posFloats.length ? posFloats : posFloats.subarray(0, validFloatLen),
+      normFloats:
+        normFloats && normFloats.length >= validFloatLen
+          ? normFloats.subarray(0, validFloatLen)
+          : null
     });
+  }
+
+  const centerX = Number.isFinite(minX) && Number.isFinite(maxX) ? (minX + maxX) * 0.5 : 0;
+  const centerY = Number.isFinite(minY) && Number.isFinite(maxY) ? (minY + maxY) * 0.5 : 0;
+  const centerZ = Number.isFinite(minZ) && Number.isFinite(maxZ) ? (minZ + maxZ) * 0.5 : 0;
+
+  // Batas maksimum float per sub-mesh: 18.000 segitiga = 54.000 vertex = 162.000 float
+  // (Mencegah overflow Uint16Array 65.535 vertex di dalam Autodesk Viewer Three.js r71)
+  const MAX_FLOATS_PER_CHUNK = 162000;
+  const materialCache = new Set();
+
+  // Tahap 2: Geser titik tengah ke (0,0,0), bagi sub-mesh jika >54.000 vertex, dan masukkan ke SceneBuilder
+  for (let i = 0; i < preparedMeshes.length; i++) {
+    const { item, posFloats, normFloats } = preparedMeshes[i];
+
+    // Geser seluruh vertex ke pusat (0,0,0)
+    if (centerX !== 0 || centerY !== 0 || centerZ !== 0) {
+      for (let j = 0; j < posFloats.length; j += 3) {
+        posFloats[j] -= centerX;
+        posFloats[j + 1] -= centerY;
+        posFloats[j + 2] -= centerZ;
+      }
+    }
+
+    const finalNormals =
+      normFloats && normFloats.length === posFloats.length
+        ? normFloats
+        : computeVertexNormals(posFloats, null);
+
+    const colorHex = item.colorHex || 0x38bdf8;
+    const matKey = `mat_shared_${colorHex.toString(16)}`;
+    if (!materialCache.has(matKey)) {
+      const mat = new THREE.MeshPhongMaterial({
+        color: new THREE.Color(colorHex),
+        specular: new THREE.Color(0x334155),
+        shininess: 38,
+        side: THREE.DoubleSide
+      });
+      modelBuilder.addMaterial(matKey, mat);
+      materialCache.add(matKey);
+    }
+
+    for (let offset = 0; offset < posFloats.length; offset += MAX_FLOATS_PER_CHUNK) {
+      const end = Math.min(offset + MAX_FLOATS_PER_CHUNK, posFloats.length);
+      const chunkPos =
+        offset === 0 && end === posFloats.length
+          ? posFloats
+          : new Float32Array(posFloats.buffer, posFloats.byteOffset + offset * 4, end - offset);
+      const chunkNorm =
+        offset === 0 && end === finalNormals.length
+          ? finalNormals
+          : new Float32Array(
+              finalNormals.buffer,
+              finalNormals.byteOffset + offset * 4,
+              end - offset
+            );
+
+      const bufGeom = new THREE.BufferGeometry();
+      const posAttr = new THREE.BufferAttribute(chunkPos, 3);
+      const normAttr = new THREE.BufferAttribute(chunkNorm, 3);
+
+      if (typeof bufGeom.addAttribute === 'function') {
+        bufGeom.addAttribute('position', posAttr);
+        bufGeom.addAttribute('normal', normAttr);
+      } else if (typeof bufGeom.setAttribute === 'function') {
+        bufGeom.setAttribute('position', posAttr);
+        bufGeom.setAttribute('normal', normAttr);
+      }
+
+      bufGeom.computeBoundingBox();
+      bufGeom.computeBoundingSphere();
+
+      const mesh = new THREE.Mesh(bufGeom, modelBuilder.findMaterial(matKey));
+      mesh.matrixAutoUpdate = false;
+      mesh.updateMatrix();
+
+      const dbId = modelBuilder.addMesh(mesh);
+      customDemoMetadataMap.set(dbId, {
+        dbId,
+        name: item.name || `Component #${i + 1}`,
+        category: item.category || '3D Element',
+        system: item.system || modelName,
+        material: item.materialName || 'CAD Material',
+        specs: item.specs || {
+          'Element Name': item.name || `Component #${i + 1}`,
+          Triangles: String(Math.floor(posFloats.length / 9))
+        }
+      });
+    }
   }
 
   viewer.fitToView();
