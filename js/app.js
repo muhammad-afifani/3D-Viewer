@@ -263,7 +263,24 @@ async function registerServiceWorker() {
   }
 
   try {
-    const registration = await navigator.serviceWorker.register('./sw.js', { scope: './' });
+    let refreshing = false;
+    const hadController = Boolean(navigator.serviceWorker.controller);
+
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (hadController && !refreshing) {
+        refreshing = true;
+        window.location.reload();
+      }
+    });
+
+    const registration = await navigator.serviceWorker.register('./sw.js', {
+      scope: './',
+      updateViaCache: 'none'
+    });
+
+    if (navigator.onLine) {
+      registration.update().catch(() => {});
+    }
 
     navigator.serviceWorker.addEventListener('message', (event) => {
       const data = event.data || {};

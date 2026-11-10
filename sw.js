@@ -296,7 +296,18 @@ self.addEventListener('install', (event) => {
   event.waitUntil(
     (async () => {
       const shellCache = await caches.open(CACHE_SHELL);
-      await shellCache.addAll(APP_SHELL_FILES);
+      await Promise.all(
+        APP_SHELL_FILES.map(async (path) => {
+          try {
+            const resp = await fetch(path, { cache: 'reload' });
+            if (resp.ok) {
+              await shellCache.put(path, resp);
+            }
+          } catch {
+            await shellCache.add(path);
+          }
+        })
+      );
       try {
         await cacheExternalSdkAssets();
       } catch (err) {
@@ -392,7 +403,6 @@ self.addEventListener('fetch', (event) => {
           }
           return networkResp;
         } catch (err) {
-          // Coba cocokkan tanpa query string jika gagal saat offline
           const fallbackResp = await sdkCache.match(url.origin + url.pathname, {
             ignoreSearch: true
           });
@@ -404,30 +414,27 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // 3. Strategi Stale-While-Revalidate (dengan fallback Offline penuh) untuk App Shell lokal
+  // 3. Strategi Network-First dengan Fallback Offline Cache Penuh untuk App Shell lokal
+  //    (Agar saat Online selalu mendapat update terbaru, dan saat Offline tetap jalan 100% dari Cache)
   if (url.origin === self.location.origin) {
     event.respondWith(
       (async () => {
         const shellCache = await caches.open(CACHE_SHELL);
-        const cached = await shellCache.match(request, { ignoreSearch: true });
-
-        const networkPromise = fetch(request)
-          .then((netResp) => {
-            if (netResp && netResp.ok) {
-              shellCache.put(request, netResp.clone());
-            }
+        try {
+          const netResp = await fetch(request);
+          if (netResp && netResp.ok) {
+            shellCache.put(request, netResp.clone());
             return netResp;
-          })
-          .catch(() => null);
+          }
+        } catch {
+          // Sedang Offline -> ambil dari Cache
+        }
 
+        const cached = await shellCache.match(request, { ignoreSearch: true });
         if (cached) {
           return cached;
         }
 
-        const netResult = await networkPromise;
-        if (netResult) return netResult;
-
-        // Fallback ke index.html untuk navigasi halaman saat offline
         if (request.mode === 'navigate') {
           const indexFallback = await shellCache.match('./index.html');
           if (indexFallback) return indexFallback;
