@@ -12,8 +12,8 @@
  *    langsung dari IndexedDB (NWDViewerOfflineDB).
  */
 
-const CACHE_SHELL = 'nwd-viewer-shell-v1';
-const CACHE_SDK = 'nwd-viewer-sdk-v1';
+const CACHE_SHELL = 'nwd-viewer-shell-v2';
+const CACHE_SDK = 'nwd-viewer-sdk-v2';
 
 const DB_NAME = 'NWDViewerOfflineDB';
 const DB_VERSION = 1;
@@ -29,6 +29,7 @@ const APP_SHELL_FILES = [
   './css/styles.css',
   './js/app.js',
   './js/aps-client.js',
+  './js/local-loaders.js',
   './js/storage.js',
   './js/viewer.js'
 ];

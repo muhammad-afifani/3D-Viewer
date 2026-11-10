@@ -1,36 +1,29 @@
 # 🏗️ NWD Offline & Cloud Web Viewer (PWA)
 
-Aplikasi web progresif (**Progressive Web App / PWA**) berbasis browser untuk mengonversi, mengekstrak, menyimpan, dan memvisualisasikan model 3D **Autodesk Navisworks (`.nwd` / `.nwc`)**, **Revit (`.rvt`)**, dan **IFC (`.ifc`)** secara **100% Offline** maupun **Cloud** tanpa perlu menginstal software `.exe` atau membutuhkan hak akses Administrator di laptop kantor.
+Aplikasi web progresif (**Progressive Web App / PWA**) berbasis browser untuk mengonversi, mengekstrak, menyimpan, dan memvisualisasikan model 3D **Autodesk Navisworks (`.nwd` / `.nwc`)**, **OpenBIM (`.ifc`)**, **glTF 2.0 (`.glb` / `.gltf`)**, **Wavefront (`.obj`)**, dan **CAD Solid (`.stl`)** secara **100% Offline** di browser tanpa perlu menginstal software `.exe`, tanpa akses Administrator, dan **tanpa memerlukan Kartu Kredit**.
 
 ---
 
-## ✨ Fitur Utama
+## ✨ 3 Cara Membuka Model 3D (Termasuk 2 Metode 100% Gratis Tanpa Kartu Kredit!)
 
-1. **Zero-Install & 100% Jalan di Browser (Tanpa Admin)**
-   - Dibangun menggunakan **Pure HTML5, Vanilla CSS3 (Dark CAD/BIM Workstation UI), dan Vanilla JavaScript (ES Modules)**.
-   - Dapat langsung di-host secara gratis di **GitHub Pages** dan di-install sebagai aplikasi mandiri (**PWA**) di Google Chrome atau Microsoft Edge.
+### 🟢 Metode 1: Direct Offline 3D/BIM Loader (`.IFC`, `.GLB`, `.GLTF`, `.OBJ`, `.STL`) — *Tanpa Kartu Kredit & Tanpa Internet*
+1. Buka tab **Offline Library** di sidebar kiri.
+2. Langsung *Drag & Drop* file **`.ifc`**, **`.glb`**, **`.gltf`**, **`.obj`**, atau **`.stl`** dari komputer Anda.
+3. Engine parser lokal ([`js/local-loaders.js`](file:///home/antigravity/muhammad-afifani/3D-Viewer/js/local-loaders.js)) akan memproses geometri 3D dan properti BIM secara **100% lokal di dalam browser**, menyimpannya ke **IndexedDB**, dan menampilkannya di 3D Viewer lengkap dengan fitur *Orbit, Walk (WASD), Measure, Section Box/Plane, Explode, Search, Isolate, dan Saved Viewpoints*.
 
-2. **Hybrid Cloud-to-Offline Architecture**
-   - **Mode Online (NWD Cloud Translator & SVF Bubble Extractor):**
-     Menggunakan **Autodesk Platform Services (APS / Forge) REST API v2** langsung dari browser (*client-side*) untuk melakukan autentikasi 2-Legged OAuth2, membuat OSS Bucket, mengunggah file `.nwd` berukuran besar menggunakan *Direct-to-S3 Signed Chunked Upload*, menjalankan *Model Derivative SVF Translation Job*, lalu **membongkar `manifest.json` di dalam file `.svf` (menggunakan `JSZip`) untuk mengunduh seluruh file bubble dependen** (`.svf`, `.pf`, `.pack`, `.bin`, `Materials.json.gz`, tekstur, dan *Property Database* `objects_*.json.gz`) langsung ke **IndexedDB** browser.
-   - **Mode Offline (100% Offline Viewer via Service Worker Virtual Server):**
-     `sw.js` meng-cache seluruh *App Shell* beserta engine **Autodesk Viewer v7 (`viewer3D.min.js`, `style.min.css`, `lmvworker.min.js`, dan ekstensi)** serta menyediakan **Virtual Local SVF Server (`/local-svf/{modelId}/{path}`)** yang melayani request binary langsung dari **IndexedDB** saat tidak ada koneksi internet sama sekali.
+### 🟢 Metode 2: Ekstrak File `.NWD` Mentah Gratis via `viewer.autodesk.com` — *Tanpa Kartu Kredit*
+Jika Anda hanya memiliki file mentah **`.nwd`** dan tidak ingin mendaftarkan Kartu Kredit di portal developer APS:
+1. Buka portal web gratis resmi Autodesk: **[https://viewer.autodesk.com](https://viewer.autodesk.com)** (cukup login dengan email biasa, **100% gratis tanpa kartu kredit**).
+2. Upload file **`.nwd`** Anda ke `viewer.autodesk.com` dan tunggu hingga model 3D selesai tampil di layar.
+3. Di aplikasi **NWD Offline & Cloud Web Viewer** kita, buka tab **Cloud .NWD** lalu klik tombol hijau **"Copy Script Ekstraktor .NWD"** (atau tarik tombol **⚡ Bookmarklet** ke bilah bookmark browser Anda).
+4. Kembali ke tab `viewer.autodesk.com`, tekan tombol **`F12`** (buka tab **Console**), *Paste* script tersebut lalu tekan **`Enter`**.
+5. Browser akan otomatis mengekstrak seluruh mesh 3D, posisi dunia, warna material, dan nama objek menjadi satu file **`Model_Offline_Package.nwdjson`**.
+6. *Drag & Drop* file **`Model_Offline_Package.nwdjson`** tersebut ke tab **Offline Library** di aplikasi kita — model `.nwd` Anda kini tersimpan di **IndexedDB**, bisa di-export menjadi **`.nwdpack.zip`** (untuk Flashdisk), dan bisa dibuka **100% Offline selamanya**!
 
-3. **Offline Model Library & `.nwdpack.zip` Packager**
-   - Kelola daftar model 3D yang tersimpan di **IndexedDB** lengkap dengan informasi ukuran, jumlah file, dan tanggal simpan.
-   - **Export as `.zip` (`.nwdpack.zip`):** Bungkus seluruh bubble SVF dari IndexedDB menjadi satu file `.nwdpack.zip` untuk dipindahkan lewat Flashdisk dari PC rumah/pribadi ke laptop kantor yang terkunci.
-   - **Import Offline `.zip` Package:** Drag & Drop file `.nwdpack.zip` di laptop kantor tanpa internet — otomatis diekstrak ke IndexedDB dan langsung dibuka di 3D Viewer.
-   - **Built-in Demo Industrial Plant 3D Model:** Dilengkapi model 3D *Industrial Process Plant (Hydrotreater Unit 100)* bawaan untuk menguji seluruh fitur navigasi 3D secara instan tanpa perlu menyiapkan kredensial APS terlebih dahulu.
-
-4. **Full Navisworks-like 3D CAD/BIM Toolbar**
-   - **Orbit, Pan, Zoom, Fit to View**
-   - **First-Person Walkthrough (`BIM Walk`)** dengan kontrol keyboard `W` `A` `S` `D` + `Q`/`E` + `Shift` + Mouse seperti Navisworks Freedom.
-   - **Model Browser / Selection Tree** & **BIM Properties Inspector Panel** (menampilkan seluruh metadata rekayasa/engineering saat pipa, peralatan, atau struktur diklik).
-   - **Measure Tool** (ukur jarak, sudut, area, dan kalibrasi).
-   - **Section Analysis** (potong model 3D dengan bidang X / Y / Z atau *Section Box*).
-   - **Explode Model Slider** & **Ghosting / Isolate / Hide Selected / Show All**.
-   - **Search & Isolate Bar** (cari nama item/pipa/tag di dalam pohon model & properti, lalu otomatis melakukan *Isolate & Fit-to-View* dengan navigasi Next/Prev).
-   - **Color Theme Switcher** (*Dark CAD Studio*, *Technical Light*, *Sky Daylight*) & **Saved Viewpoints** (simpan posisi kamera + potongan section ke `localStorage`).
+### 🔵 Metode 3: Direct APS Cloud Translator (Jika Memiliki `Client ID` & `Client Secret` APS)
+Jika Anda memiliki kredensial API dari `aps.autodesk.com`:
+1. Buka tombol **APS Settings** di pojok kanan atas, masukkan `Client ID` & `Client Secret`, lalu klik **Test Connection**.
+2. Pada tab **Cloud .NWD** (Opsi 2), *Drag & Drop* file `.nwd` Anda untuk diterjemahkan ke `.svf` dan diunduh seluruh bubble-nya ke IndexedDB secara otomatis.
 
 ---
 
@@ -48,6 +41,7 @@ Aplikasi web progresif (**Progressive Web App / PWA**) berbasis browser untuk me
 │   └── styles.css      # Styling workstation CAD/BIM & kustomisasi panel Autodesk Viewer
 ├── js/
 │   ├── app.js          # Controller utama UI, manajemen tab, state, & event handler
+│   ├── local-loaders.js# Parser 3D/BIM lokal (.IFC, .GLB, .OBJ, .STL, .NWDJSON) & Extractor
 │   ├── aps-client.js   # Modul REST API Autodesk APS & Recursive SVF Bubble Downloader
 │   ├── storage.js      # Modul IndexedDB & Export/Import paket .nwdpack.zip (JSZip)
 │   └── viewer.js       # Modul GuiViewer3D, Offline Loader, Search, & Saved Viewpoints
@@ -56,63 +50,9 @@ Aplikasi web progresif (**Progressive Web App / PWA**) berbasis browser untuk me
 
 ---
 
-## 🚀 1. Cara Mengaktifkan GitHub Pages di Repository Ini
+## 💻 Cara Pakai Mode 100% Offline di Laptop Kantor (Tanpa Admin & Tanpa Internet)
 
-Karena aplikasi ini dibuat dengan arsitektur **Zero-Build Static ES Modules**, Anda tidak perlu menjalankan `npm run build` untuk men-deploy ke GitHub Pages:
-
-1. Buka repository GitHub ini di browser (`https://github.com/muhammad-afifani/3D-Viewer`).
-2. Klik tab **Settings** di bagian atas repository.
-3. Pada menu sebelah kiri, klik **Pages** (di bagian *Code and automation*).
-4. Pada bagian **Build and deployment** -> **Source**, pilih **Deploy from a branch**.
-5. Pada bagian **Branch**, pilih branch **`main`** dan folder **`/ (root)`**, lalu klik **Save**.
-6. Tunggu sekitar 1–2 menit, lalu buka URL GitHub Pages Anda:
-   👉 **`https://muhammad-afifani.github.io/3D-Viewer/`**
-
----
-
-## 🔑 2. Cara Mendapatkan `Client ID` & `Client Secret` Gratis di Autodesk Platform Services (APS)
-
-Untuk menerjemahkan file mentah `.nwd` ke format web `.svf` (Mode Online), Anda memerlukan kredensial API dari Autodesk Platform Services:
-
-1. Kunjungi portal resmi [**https://aps.autodesk.com/**](https://aps.autodesk.com/) lalu klik **Sign In** (atau daftar akun Autodesk gratis).
-2. Klik tombol **Go to my apps** di pojok kanan atas, lalu klik **Create application**.
-3. Beri nama aplikasi (misalnya `NWD Offline Converter`), pilih tipe **Traditional Web App** (atau *Server-to-Server*), lalu klik **Create**.
-4. Pada halaman konfigurasi aplikasi yang baru dibuat:
-   - Salin **Client ID** dan **Client Secret** Anda.
-   - Pastikan pada daftar API di bawahnya, opsi **Data Management API** dan **Model Derivative API** sudah dicentang (*Enabled*).
-5. Buka aplikasi **NWD Offline & Cloud Web Viewer**, klik tombol **APS Settings** di pojok kanan atas:
-   - Tempelkan `Client ID` dan `Client Secret` Anda.
-   - Klik **Test Connection (2-Legged OAuth)** untuk memastikan token valid.
-   - Klik **Simpan Kredensial**. *(Kredensial hanya disimpan di `localStorage` browser Anda sendiri, tidak pernah dikirim ke pihak ketiga atau disimpan di GitHub).*
-
----
-
-## ☁️ 3. Cara Pakai Mode Online (Convert `.nwd` $\rightarrow$ Simpan Offline / Export `.zip`)
-
-Lakukan langkah ini saat Anda memiliki koneksi internet (misalnya di laptop pribadi atau saat terhubung Wi-Fi):
-
-1. Buka tab **Cloud .NWD** di sidebar sebelah kiri.
-2. **Drag & Drop** file `.nwd` (atau `.nwc`, `.rvt`, `.ifc`) ke area upload.
-3. Pantau **4 Tahapan Progress Bar Real-time**:
-   - **Tahap 1:** Autentikasi 2-Legged OAuth2 ke server APS.
-   - **Tahap 2:** Pembuatan OSS Bucket otomatis & pengunggahan file `.nwd` menggunakan *Signed S3 Chunked Upload* (aman untuk file berukuran besar).
-   - **Tahap 3:** Menjalankan *Model Derivative Job* (konversi `.nwd` ke `.svf`) dan memantau progress translasi `0% - 100%`.
-   - **Tahap 4:** **Recursive SVF Bubble Downloader** — aplikasi secara otomatis membongkar manifest utama dan `manifest.json` di dalam `0.svf` untuk mengunduh seluruh file geometri (`.pf`, `.pack`, `.bin`), material (`Materials.json.gz`), tekstur, dan *Property Database* (`objects_attrs.json.gz`, `objects_vals.json.gz`, `objects_avs.json.gz`, `objects_offs.json.gz`, `objects_ids.json.gz`) ke **IndexedDB** browser.
-4. Setelah selesai, model akan langsung terbuka di 3D Viewer dan muncul di daftar **Offline Library**.
-5. Klik tombol **Export .zip** pada kartu model untuk mengunduh satu file bundel **`.nwdpack.zip`** yang siap disimpan di Flashdisk.
-
----
-
-## 💻 4. Cara Pakai Mode 100% Offline di Laptop Kantor (Tanpa Admin & Tanpa Internet)
-
-### A. Persiapan Satu Kali di Laptop Kantor (Saat Masih Terhubung Jaringan)
-1. Buka URL GitHub Pages aplikasi ini di Google Chrome atau Microsoft Edge laptop kantor.
-2. Klik tombol **Cache Engine Offline** di bagian header atas hingga muncul notifikasi bahwa seluruh modul **Autodesk Viewer v7 SDK** (`viewer3D.min.js`, `style.min.css`, `lmvworker.min.js`, dan ekstensi) telah tersimpan di cache Service Worker.
-3. *(Opsional namun disarankan)* Klik tombol **Install PWA** di bagian header (atau ikon *Install App* di address bar Chrome/Edge) agar aplikasi terpasang di Desktop / Start Menu laptop kantor Anda.
-
-### B. Membuka Model `.nwd` Saat 100% Offline (Tanpa Internet)
-1. Buka aplikasi **NWD Offline & Cloud Web Viewer** (melalui shortcut PWA Desktop atau browser).
-2. Jika model sudah pernah di-download di laptop tersebut, langsung klik tombol **Buka 3D (Offline)** pada daftar **Offline Library**.
-3. Jika Anda membawa file **`.nwdpack.zip`** menggunakan Flashdisk dari komputer lain:
-   - Pada tab **Offline Library**, *Drag & Drop* file `.nwdpack.zip` ke kotak **Import Paket Offline (.zip)**.
-   - Aplikasi akan mengekstrak seluruh isi paket ke **IndexedDB** secara lokal dan langsung menampilkan model 3D lengkap dengan struktur pohon (*Model Browser*) dan properti BIM-nya secara **100% Offline**!
+1. Buka URL GitHub Pages Anda: **[https://muhammad-afifani.github.io/3D-Viewer/](https://muhammad-afifani.github.io/3D-Viewer/)** di Google Chrome atau Microsoft Edge laptop kantor saat masih ada jaringan.
+2. Klik tombol **"Cache Engine Offline"** di bagian header atas hingga muncul notifikasi bahwa seluruh modul **Autodesk Viewer v7 SDK** telah tersimpan di cache Service Worker.
+3. Klik tombol **"Install PWA"** di bagian header agar aplikasi terpasang di Desktop / Start Menu laptop kantor Anda.
+4. Matikan Wi-Fi / internet kapan saja — Anda tetap dapat membuka model dari daftar **IndexedDB Offline Library** atau melakukan *Drag & Drop* file `.nwdpack.zip`, `.nwdjson`, `.ifc`, `.glb`, `.obj`, dan `.stl` dari Flashdisk secara **100% Offline**!

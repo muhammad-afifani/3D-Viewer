@@ -120,10 +120,10 @@
 
         <div class="sidebar-content">
           <!-- ==============================================================
-               TAB 1: OFFLINE LIBRARY & .NWDPACK.ZIP IMPORTER
+               TAB 1: OFFLINE LIBRARY & DIRECT LOCAL 3D/BIM IMPORTER
                ============================================================== -->
           <div id="tabLibrary" class="tab-pane active">
-            <!-- Import Offline ZIP Package -->
+            <!-- Import Offline ZIP or Direct 3D/BIM File -->
             <div class="panel-section">
               <div class="section-header">
                 <span class="section-title">
@@ -132,16 +132,16 @@
                     <polyline points="17 8 12 3 7 8" />
                     <line x1="12" y1="3" x2="12" y2="15" />
                   </svg>
-                  Import Paket Offline (.zip)
+                  Buka File 3D / Paket Offline
                 </span>
-                <span class="badge badge-offline">100% OFFLINE</span>
+                <span class="badge badge-offline">TANPA KARTU KREDIT</span>
               </div>
               <p class="section-desc">
-                Buka file <code>.nwdpack.zip</code> (atau arsip <code>.zip</code> bubble SVF) dari Flashdisk/lokal tanpa memerlukan internet sama sekali.
+                Berjalan <strong>100% Offline di browser</strong> tanpa API Key! Mendukung langsung file <code>.ifc</code>, <code>.glb</code>, <code>.gltf</code>, <code>.obj</code>, <code>.stl</code>, <code>.nwdjson</code>, maupun paket <code>.nwdpack.zip</code>.
               </p>
 
               <div id="dropzoneZip" class="dropzone">
-                <input id="inputZipFile" type="file" accept=".zip,application/zip" />
+                <input id="inputZipFile" type="file" accept=".zip,.ifc,.glb,.gltf,.obj,.stl,.nwdjson,.json,application/zip" />
                 <div class="dropzone-icon">
                   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
@@ -150,13 +150,13 @@
                     <line x1="9" y1="15" x2="15" y2="15" />
                   </svg>
                 </div>
-                <div class="dropzone-title">Drag &amp; Drop file .nwdpack.zip di sini</div>
-                <div class="dropzone-hint">atau klik untuk memilih dari komputer</div>
+                <div class="dropzone-title">Drag &amp; Drop .IFC, .GLB, .OBJ, .STL, .ZIP, atau .NWDJSON</div>
+                <div class="dropzone-hint">Langsung diproses 100% lokal di browser tanpa server/APS</div>
               </div>
 
-              <!-- Progress Bar Ekstraksi ZIP -->
+              <!-- Progress Bar Ekstraksi ZIP / Local 3D -->
               <div id="zipProgressBox" class="pipeline-card" style="display: none;">
-                <div id="zipProgressText" class="pipeline-filename">Mengekstrak paket ZIP...</div>
+                <div id="zipProgressText" class="pipeline-filename">Memproses file 3D lokal...</div>
                 <div class="progress-track">
                   <div id="zipProgressFill" class="progress-fill"></div>
                 </div>
@@ -191,21 +191,52 @@
           </div>
 
           <!-- ==============================================================
-               TAB 2: CLOUD NWD TRANSLATOR & SVF BUBBLE EXTRACTOR
+               TAB 2: FREE .NWD EXTRACTOR (NO CREDIT CARD) & APS CLOUD
                ============================================================== -->
           <div id="tabCloud" class="tab-pane">
+            <!-- OPSI 1: GRATIS TANPA KARTU KREDIT VIA VIEWER.AUTODESK.COM -->
+            <div class="panel-section" style="border-color: hsla(158, 76%, 42%, 0.45);">
+              <div class="section-header">
+                <span class="section-title" style="color: hsl(158, 76%, 62%);">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+                  </svg>
+                  Opsi 1: Konversi .NWD Tanpa Kartu Kredit
+                </span>
+                <span class="badge badge-offline">100% GRATIS</span>
+              </div>
+              <p class="section-desc">
+                Tidak punya Kartu Kredit untuk daftar APS? Gunakan portal gratis <strong>viewer.autodesk.com</strong> (cukup login email biasa) lalu ekstrak modelnya ke aplikasi ini:
+              </p>
+              <ol style="padding-left: 16px; font-size: 11.5px; color: var(--text-secondary); display: flex; flex-direction: column; gap: 5px;">
+                <li>Buka <a href="https://viewer.autodesk.com" target="_blank" rel="noopener noreferrer" style="color: var(--accent-primary); font-weight: 600;">viewer.autodesk.com</a> &amp; upload file <code>.nwd</code> Anda hingga tampil 3D-nya.</li>
+                <li>Klik tombol <strong>Copy Script Ekstraktor</strong> di bawah ini.</li>
+                <li>Di tab <code>viewer.autodesk.com</code>, tekan <span class="kbd">F12</span> (tab <strong>Console</strong>), <em>Paste</em> script lalu tekan <span class="kbd">Enter</span>.</li>
+                <li>File <code>Model_Offline_Package.nwdjson</code> akan otomatis terunduh &mdash; langsung <em>Drag &amp; Drop</em> ke tab <strong>Offline Library</strong>!</li>
+              </ol>
+              <div style="display: flex; gap: 6px; flex-wrap: wrap; margin-top: 2px;">
+                <button id="btnCopyFreeExtractor" class="btn btn-success btn-sm" style="flex: 1;">
+                  Copy Script Ekstraktor .NWD
+                </button>
+                <a id="bookmarkletFreeExtractor" href="#" class="btn btn-sm" title="Tarik (Drag) tombol ini ke Bookmarks Bar browser Anda, lalu klik saat membuka viewer.autodesk.com">
+                  ⚡ Bookmarklet
+                </a>
+              </div>
+            </div>
+
+            <!-- OPSI 2: KONVERSI OTOMATIS VIA APS REST API -->
             <div class="panel-section">
               <div class="section-header">
                 <span class="section-title">
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z" />
                   </svg>
-                  NWD Cloud Translator &amp; Extractor
+                  Opsi 2: Direct APS Cloud Translator
                 </span>
-                <span class="badge badge-cloud">APS REST API</span>
+                <span class="badge badge-cloud">APS KEY</span>
               </div>
               <p class="section-desc">
-                Unggah file mentah <code>.nwd</code> (atau <code>.nwc</code> / <code>.rvt</code> / <code>.ifc</code>). Aplikasi akan menerjemahkannya ke <code>.svf</code> di Autodesk Cloud lalu mengunduh seluruh bubble ke IndexedDB untuk dipakai <strong>100% Offline</strong>.
+                Jika Anda memiliki <code>Client ID</code> &amp; <code>Client Secret</code> APS, unggah file <code>.nwd</code> di sini untuk konversi &amp; download SVF Bubble otomatis:
               </p>
 
               <div id="dropzoneNwd" class="dropzone">
@@ -217,7 +248,7 @@
                     <line x1="12" y1="3" x2="12" y2="15" />
                   </svg>
                 </div>
-                <div class="dropzone-title">Drag &amp; Drop file .NWD di sini</div>
+                <div class="dropzone-title">Drag &amp; Drop file .NWD (APS Cloud)</div>
                 <div class="dropzone-hint">Mendukung .nwd, .nwc, .rvt, .ifc (Signed S3 Chunked Upload)</div>
               </div>
 
@@ -426,26 +457,26 @@
                 <div class="workflow-box">
                   <h3>
                     <span class="badge badge-offline">100% OFFLINE</span>
-                    <span>Buka Paket .nwdpack.zip</span>
+                    <span>Buka .IFC, .GLB, .OBJ, .STL, / .ZIP</span>
                   </h3>
                   <p>
-                    Tidak ada internet di laptop kantor? Import file <code>.nwdpack.zip</code> dari Flashdisk ke IndexedDB dan buka langsung melalui Virtual Server Service Worker.
+                    Tanpa internet &amp; tanpa Kartu Kredit! Buka langsung file <code>.ifc</code>, <code>.glb</code>, <code>.gltf</code>, <code>.obj</code>, <code>.stl</code>, <code>.nwdjson</code>, atau paket <code>.nwdpack.zip</code> di browser.
                   </p>
                   <button id="btnEmptyImportZip" class="btn btn-primary btn-sm">
-                    Import Paket .zip Offline
+                    Buka File 3D / Paket Offline
                   </button>
                 </div>
 
                 <div class="workflow-box">
                   <h3>
-                    <span class="badge badge-cloud">MODE ONLINE</span>
-                    <span>Konversi File Mentah .NWD</span>
+                    <span class="badge badge-cloud">GRATIS</span>
+                    <span>Ekstrak File Mentah .NWD</span>
                   </h3>
                   <p>
-                    Gunakan akun gratis Autodesk Platform Services (APS) untuk menerjemahkan file <code>.nwd</code> ke <code>.svf</code> dan mengunduh seluruh bubble untuk penggunaan offline.
+                    Konversi file <code>.nwd</code> secara gratis tanpa Kartu Kredit melalui <strong>viewer.autodesk.com</strong> (1-Klik Script Extractor) atau menggunakan APS Key.
                   </p>
                   <button id="btnEmptyConvertNwd" class="btn btn-sm">
-                    Upload &amp; Konversi .NWD
+                    Cara Ekstrak .NWD Gratis
                   </button>
                 </div>
               </div>

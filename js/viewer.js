@@ -5,15 +5,18 @@
  * Menangani:
  * 1. Inisialisasi Autodesk.Viewing.GuiViewer3D dalam mode Local/Offline maupun Cloud
  * 2. Load model .svf dari Virtual Service Worker URL (/local-svf/{modelId}/...)
- * 3. Load model langsung dari Cloud URN (urn:...)
- * 4. Generator Model 3D Demo Industrial Plant (SceneBuilder) untuk uji coba
- *    100% Offline instan tanpa perlu kredensial APS
- * 5. Fitur CAD/BIM Navisworks: Search & Isolate, First-Person Walk (WASD),
+ * 3. Load model lokal langsung (.IFC, .GLB, .GLTF, .OBJ, .STL, .NWDJSON)
+ *    tanpa memerlukan Cloud / Kartu Kredit APS menggunakan SceneBuilder
+ * 4. Load model langsung dari Cloud URN (urn:...)
+ * 5. Generator Model 3D Demo Industrial Plant (SceneBuilder) untuk uji coba
+ *    100% Offline instan
+ * 6. Fitur CAD/BIM Navisworks: Search & Isolate, First-Person Walk (WASD),
  *    Measure, Section Box/Plane, Explode, Ghosting, Theme Switcher,
  *    dan Saved Viewpoints (localStorage).
  */
 
-import { normalizeSvfPath } from './storage.js';
+import { normalizeSvfPath, getModelFile } from './storage.js';
+import { parseLocal3DFile, computeVertexNormals } from './local-loaders.js';
 
 const VIEWPOINTS_STORAGE_PREFIX = 'nwd_viewer_viewpoints_';
 
@@ -21,7 +24,7 @@ let viewerInstance = null;
 let isInitializerDone = false;
 let currentLoadedModelId = null;
 let currentGhostingState = true;
-let customDemoMetadataMap = new Map(); // dbId -> object metadata untuk Demo Model
+let customDemoMetadataMap = new Map(); // dbId -> object metadata untuk Demo & Local 3D Model
 
 /**
  * Memastikan Autodesk.Viewing.Initializer sudah dijalankan (Mode Local / Offline-first).
@@ -103,7 +106,7 @@ export async function initViewer(container, onSelectionChanged) {
 
     const primaryDbId = dbIds[0];
 
-    // Cek apakah objek berasal dari Demo Model dengan metadata BIM khusus
+    // Cek apakah objek berasal dari Local 3D / Demo Model dengan metadata BIM khusus
     if (customDemoMetadataMap.has(primaryDbId)) {
       const meta = customDemoMetadataMap.get(primaryDbId);
       onSelectionChanged({
@@ -169,8 +172,11 @@ function unloadCurrentModels() {
 }
 
 /**
- * Me-load model SVF secara 100% OFFLINE dari IndexedDB melalui Virtual Route
- * Service Worker (`/local-svf/{modelId}/{svfPath}`).
+ * Me-load model secara 100% OFFLINE dari IndexedDB:
+ * - Mendukung model .SVF via Virtual Route Service Worker (`/local-svf/{modelId}/{svfPath}`)
+ * - Mendukung model 3D/BIM lokal (`.IFC`, `.GLB`, `.GLTF`, `.OBJ`, `.STL`, `.NWDJSON`)
+ *   tanpa kartu kredit / tanpa cloud menggunakan SceneBuilder
+ * - Mendukung Built-in Industrial Plant Demo
  *
  * @param {Object} modelRecord - Metadata model dari IndexedDB
  * @param {HTMLElement} container - Container DOM #forgeViewer
@@ -182,14 +188,24 @@ export async function loadOfflineModel(modelRecord, container, onSelectionChange
   unloadCurrentModels();
   currentLoadedModelId = modelRecord.id;
 
-  // Jika model adalah Built-in Industrial Plant Demo
+  // 1. Jika model adalah Built-in Industrial Plant Demo
   if (modelRecord.isDemo || String(modelRecord.svfPath).startsWith('demo://')) {
     return buildIndustrialPlantDemoScene(viewer, modelRecord);
   }
 
+  // 2. Jika model adalah Direct Local 3D/BIM File (.IFC, .GLB, .GLTF, .OBJ, .STL, .NWDJSON)
+  if (modelRecord.source === 'local3d' || String(modelRecord.svfPath).startsWith('local3d://')) {
+    const storedFilePath = String(modelRecord.svfPath).replace(/^local3d:\/\//, '');
+    const fileRecord = await getModelFile(modelRecord.id, storedFilePath);
+    if (!fileRecord || !fileRecord.data) {
+      throw new Error(`File 3D lokal "${storedFilePath}" tidak ditemukan di IndexedDB.`);
+    }
+    const meshItems = await parseLocal3DFile(fileRecord.data, modelRecord.name);
+    return buildCustomParsedMeshScene(viewer, modelRecord.name, meshItems);
+  }
+
+  // 3. Model .SVF standar melalui Virtual Route Service Worker (/local-svf/...)
   const cleanSvfPath = normalizeSvfPath(modelRecord.svfPath);
-  // Gunakan URL relatif terhadap lokasi aplikasi agar tetap berada di bawah scope Service Worker
-  // baik di localhost maupun di GitHub Pages (https://username.github.io/repo-name/)
   const virtualUrl = new URL(
     `./local-svf/${encodeURIComponent(modelRecord.id)}/${cleanSvfPath}`,
     window.location.href
@@ -210,11 +226,9 @@ export async function loadOfflineModel(modelRecord, container, onSelectionChange
       virtualUrl,
       {},
       (loadedModel) => {
-        // loadModel success callback (manifest & header SVF berhasil dibaca)
         setTimeout(() => {
           viewer.fitToView();
         }, 350);
-        // Jika GEOMETRY_LOADED_EVENT sudah terpanggil atau segera terpanggil
         setTimeout(() => resolve(loadedModel), 900);
       },
       (errorCode, errorMessage) => {
@@ -229,6 +243,89 @@ export async function loadOfflineModel(modelRecord, container, onSelectionChange
       }
     );
   });
+}
+
+/**
+ * Membangun scene 3D di dalam Autodesk GuiViewer3D dari hasil parsing file lokal
+ * (.IFC, .GLB, .GLTF, .OBJ, .STL, atau .NWDJSON hasil ekstraksi viewer.autodesk.com).
+ */
+async function buildCustomParsedMeshScene(viewer, modelName, meshItems) {
+  const ext = await viewer.loadExtension('Autodesk.Viewing.SceneBuilder');
+  const modelBuilder = await ext.addNewModel({
+    conserveMemory: false,
+    modelNameOverride: modelName || 'Local_3D_Model'
+  });
+
+  const THREE = window.THREE;
+  customDemoMetadataMap.clear();
+
+  for (let i = 0; i < meshItems.length; i++) {
+    const item = meshItems[i];
+    if (!item.positions || item.positions.length < 9) continue;
+
+    // Jika memiliki index buffer, ekspansi ke non-indexed segitiga atau bangun THREE.BufferGeometry
+    let posFloats = item.positions;
+    let normFloats = item.normals;
+
+    if (item.indices && item.indices.length >= 3) {
+      const idxArr = item.indices;
+      const expandedPos = new Float32Array(idxArr.length * 3);
+      for (let k = 0; k < idxArr.length; k++) {
+        const vi = idxArr[k] * 3;
+        expandedPos[k * 3] = posFloats[vi] || 0;
+        expandedPos[k * 3 + 1] = posFloats[vi + 1] || 0;
+        expandedPos[k * 3 + 2] = posFloats[vi + 2] || 0;
+      }
+      posFloats = expandedPos;
+      normFloats = computeVertexNormals(posFloats, null);
+    } else if (!normFloats || normFloats.length !== posFloats.length) {
+      normFloats = computeVertexNormals(posFloats, null);
+    }
+
+    const bufGeom = new THREE.BufferGeometry();
+    const posAttr = new THREE.BufferAttribute(posFloats, 3);
+    const normAttr = new THREE.BufferAttribute(normFloats, 3);
+
+    if (typeof bufGeom.addAttribute === 'function') {
+      bufGeom.addAttribute('position', posAttr);
+      bufGeom.addAttribute('normal', normAttr);
+    } else if (typeof bufGeom.setAttribute === 'function') {
+      bufGeom.setAttribute('position', posAttr);
+      bufGeom.setAttribute('normal', normAttr);
+    }
+
+    bufGeom.computeBoundingBox();
+    bufGeom.computeBoundingSphere();
+
+    const matKey = `mat_${i}_${item.colorHex || 0x38bdf8}`;
+    const mat = new THREE.MeshPhongMaterial({
+      color: new THREE.Color(item.colorHex || 0x38bdf8),
+      specular: new THREE.Color(0x334155),
+      shininess: 38,
+      side: THREE.DoubleSide
+    });
+    modelBuilder.addMaterial(matKey, mat);
+
+    const mesh = new THREE.Mesh(bufGeom, mat);
+    mesh.matrixAutoUpdate = false;
+    mesh.updateMatrix();
+
+    const dbId = modelBuilder.addMesh(mesh);
+    customDemoMetadataMap.set(dbId, {
+      dbId,
+      name: item.name || `Component #${i + 1}`,
+      category: item.category || '3D Element',
+      system: item.system || modelName,
+      material: item.materialName || 'CAD Material',
+      specs: item.specs || {
+        'Element Name': item.name || `Component #${i + 1}`,
+        Triangles: String(Math.floor(posFloats.length / 9))
+      }
+    });
+  }
+
+  viewer.fitToView();
+  return modelBuilder.model;
 }
 
 /**
@@ -275,10 +372,8 @@ export async function loadCloudModelByUrn(urn, accessToken, container, onSelecti
 
 /**
  * Membangun Model 3D Industrial Process Plant / MEP BIM interaktif menggunakan
- * `Autodesk.Viewing.SceneBuilder` + Custom PropertyPanel agar user dapat langsung
- * menguji seluruh fitur Navisworks (Orbit, Pan, Zoom, BimWalk WASD, Measure,
- * Section Box/Plane, Explode, Search, Isolate, Properties, Viewpoints) secara
- * 100% Offline tanpa memerlukan file .nwd atau kredensial APS terlebih dahulu.
+ * `Autodesk.Viewing.SceneBuilder` agar user dapat langsung menguji seluruh
+ * fitur Navisworks secara 100% Offline.
  */
 async function buildIndustrialPlantDemoScene(viewer, modelRecord) {
   const ext = await viewer.loadExtension('Autodesk.Viewing.SceneBuilder');
@@ -363,7 +458,6 @@ async function buildIndustrialPlantDemoScene(viewer, modelRecord) {
     });
   });
 
-  // Transverse & Longitudinal Steel Beams
   [-10, 0, 10].forEach((xVal, idx) => {
     addBimComponent({
       name: `STL-BM-10${idx + 1} Transverse Pipe Rack Beam`,
@@ -418,7 +512,6 @@ async function buildIndustrialPlantDemoScene(viewer, modelRecord) {
     }
   });
 
-  // Reactor Top Dome & Bottom Skirt
   addBimComponent({
     name: 'V-1001-HEAD Top Hemispherical Head',
     category: 'Mechanical Equipment',
@@ -496,7 +589,7 @@ async function buildIndustrialPlantDemoScene(viewer, modelRecord) {
     });
   });
 
-  // 7. Process Piping Lines (12" Main Header, 8" Reactor Feed, 6" Recycle Gas)
+  // 7. Process Piping Lines
   addBimComponent({
     name: 'PIPE-12"-P-1001-CS1500 Main Process Header',
     category: 'Piping Systems',
@@ -532,7 +625,6 @@ async function buildIndustrialPlantDemoScene(viewer, modelRecord) {
     }
   });
 
-  // Vertical Riser Pipe from Reactor to Header
   addBimComponent({
     name: 'PIPE-10"-P-1002 Reactor Overhead Riser',
     category: 'Piping Systems',
@@ -548,7 +640,6 @@ async function buildIndustrialPlantDemoScene(viewer, modelRecord) {
     }
   });
 
-  // 8. Control Valves (FV-1001 & PCV-1002)
   addBimComponent({
     name: 'FV-1001 Pneumatic Globe Flow Control Valve',
     category: 'Pipe Accessories / Valves',
@@ -587,7 +678,7 @@ export async function searchObjectsInModel(query) {
     return [];
   }
 
-  // 1. Jika model adalah Demo SceneBuilder, cari di customDemoMetadataMap
+  // 1. Jika model adalah Local 3D / Demo SceneBuilder, cari di customDemoMetadataMap
   if (customDemoMetadataMap.size > 0) {
     const matchedIds = [];
     for (const [dbId, meta] of customDemoMetadataMap.entries()) {
@@ -656,18 +747,12 @@ export function isolateAndFocusDbIds(dbIds, focusSingleId = null) {
   viewerInstance.fitToView(targetFocus);
 }
 
-/**
- * Fit-to-View ke objek yang dipilih (atau seluruh model jika tidak ada seleksi).
- */
 export function fitToView() {
   if (!viewerInstance) return;
   const selected = viewerInstance.getSelection();
   viewerInstance.fitToView(selected && selected.length > 0 ? selected : undefined);
 }
 
-/**
- * Meng-isolate objek yang sedang dipilih saat ini.
- */
 export function isolateSelected() {
   if (!viewerInstance) return;
   const selected = viewerInstance.getSelection();
@@ -677,9 +762,6 @@ export function isolateSelected() {
   }
 }
 
-/**
- * Menyembunyikan (Hide) objek yang sedang dipilih.
- */
 export function hideSelected() {
   if (!viewerInstance) return;
   const selected = viewerInstance.getSelection();
@@ -689,9 +771,6 @@ export function hideSelected() {
   }
 }
 
-/**
- * Menampilkan kembali seluruh objek 3D dan mereset filter Isolate/Hide.
- */
 export function showAllObjects() {
   if (!viewerInstance) return;
   viewerInstance.isolate([]);
@@ -699,10 +778,6 @@ export function showAllObjects() {
   viewerInstance.clearSelection();
 }
 
-/**
- * Mengaktifkan/menonaktifkan efek Ghosting saat objek di-isolate.
- * @returns {boolean}
- */
 export function toggleGhosting() {
   if (!viewerInstance) return currentGhostingState;
   currentGhostingState = !currentGhostingState;
@@ -710,10 +785,6 @@ export function toggleGhosting() {
   return currentGhostingState;
 }
 
-/**
- * Mengaktifkan/menonaktifkan First-Person Walkthrough (BIM Walk WASD + Mouse).
- * @returns {Promise<boolean>} true jika BimWalk sedang aktif
- */
 export async function toggleFirstPersonWalk() {
   if (!viewerInstance) return false;
   let walkExt = viewerInstance.getExtension('Autodesk.BimWalk');
@@ -731,20 +802,12 @@ export async function toggleFirstPersonWalk() {
   }
 }
 
-/**
- * Mengatur skala Explode Model (0.0 - 1.0).
- * @param {number} scale
- */
 export function setExplodeScale(scale) {
   if (!viewerInstance) return;
   const val = Math.max(0, Math.min(1, Number(scale || 0)));
   viewerInstance.explode(val);
 }
 
-/**
- * Mengganti proyeksi kamera antara Perspective dan Orthographic.
- * @returns {string} 'perspective' | 'orthographic'
- */
 export function toggleCameraProjection() {
   if (!viewerInstance || !viewerInstance.navigation) return 'perspective';
   const camera = viewerInstance.navigation.getCamera();
@@ -757,10 +820,6 @@ export function toggleCameraProjection() {
   }
 }
 
-/**
- * Mengganti tema latar belakang & pencahayaan 3D Viewport.
- * @param {'dark' | 'light' | 'sky'} theme
- */
 export function applyViewerTheme(theme) {
   if (!viewerInstance) return;
 
@@ -771,27 +830,15 @@ export function applyViewerTheme(theme) {
     viewerInstance.setBackgroundColor(135, 185, 228, 226, 236, 245);
     viewerInstance.setLightPreset(7);
   } else {
-    // Default Dark CAD Studio
     viewerInstance.setBackgroundColor(16, 23, 36, 8, 12, 20);
     viewerInstance.setLightPreset(1);
   }
 }
 
-/**
- * ============================================================================
- * Fitur Saved Viewpoints (Menyimpan posisi kamera, section plane, & isolate)
- * ============================================================================
- */
-
 export function getActiveModelIdForViewpoints() {
   return currentLoadedModelId || 'global_default';
 }
 
-/**
- * Mengambil daftar Saved Viewpoints dari localStorage untuk model saat ini.
- * @param {string} [modelId]
- * @returns {Array<Object>}
- */
 export function getSavedViewpoints(modelId = getActiveModelIdForViewpoints()) {
   try {
     const raw = localStorage.getItem(VIEWPOINTS_STORAGE_PREFIX + modelId);
@@ -803,12 +850,6 @@ export function getSavedViewpoints(modelId = getActiveModelIdForViewpoints()) {
   }
 }
 
-/**
- * Menyimpan posisi kamera, potongan section plane, dan objek yang di-isolate saat ini.
- * @param {string} viewpointName
- * @param {string} [modelId]
- * @returns {Object} Viewpoint baru
- */
 export function saveCurrentViewpoint(viewpointName, modelId = getActiveModelIdForViewpoints()) {
   if (!viewerInstance) {
     throw new Error('3D Viewer belum aktif.');
@@ -834,10 +875,6 @@ export function saveCurrentViewpoint(viewpointName, modelId = getActiveModelIdFo
   return newVp;
 }
 
-/**
- * Me-restore posisi kamera dan potongan section plane dari sebuah Saved Viewpoint.
- * @param {Object} viewpoint
- */
 export function restoreSavedViewpoint(viewpoint) {
   if (!viewerInstance || !viewpoint || !viewpoint.state) return;
   viewerInstance.restoreState(
@@ -847,11 +884,6 @@ export function restoreSavedViewpoint(viewpoint) {
   );
 }
 
-/**
- * Menghapus satu Saved Viewpoint dari localStorage.
- * @param {string} viewpointId
- * @param {string} [modelId]
- */
 export function deleteSavedViewpoint(viewpointId, modelId = getActiveModelIdForViewpoints()) {
   const list = getSavedViewpoints(modelId).filter((vp) => vp.id !== viewpointId);
   localStorage.setItem(VIEWPOINTS_STORAGE_PREFIX + modelId, JSON.stringify(list));

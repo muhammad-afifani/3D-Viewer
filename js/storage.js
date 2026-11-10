@@ -442,6 +442,7 @@ export async function exportModelAsZip(modelId, onProgress) {
       fileCount: files.length,
       totalSize: meta.totalSize,
       createdAt: meta.createdAt,
+      source: meta.source || 'cloud',
       isDemo: Boolean(meta.isDemo),
       demoConfig: meta.demoConfig || null
     }
@@ -449,13 +450,11 @@ export async function exportModelAsZip(modelId, onProgress) {
 
   zip.file('nwdpack-manifest.json', JSON.stringify(packageManifest, null, 2));
 
-  // Masukkan seluruh binary file SVF sesuai path relatifnya
+  // Masukkan seluruh binary file sesuai path relatifnya
   for (let i = 0; i < files.length; i++) {
     const f = files[i];
     const cleanPath = normalizeSvfPath(f.path);
-    // Karena sebagian besar file SVF (.pf, .pack, .gz, .svf) sudah terkompresi,
-    // gunakan STORE untuk file .gz/.svf/.png/.jpg dan DEFLATE cepat untuk lainnya
-    const isAlreadyCompressed = /\.(gz|svf|zip|png|jpg|jpeg|pf|pack)$/i.test(cleanPath);
+    const isAlreadyCompressed = /\.(gz|svf|zip|png|jpg|jpeg|pf|pack|glb)$/i.test(cleanPath);
     zip.file(cleanPath, f.data, {
       binary: true,
       compression: isAlreadyCompressed ? 'STORE' : 'DEFLATE',
@@ -476,7 +475,7 @@ export async function exportModelAsZip(modelId, onProgress) {
   );
 
   const safeBaseName = String(meta.name || 'model')
-    .replace(/\.(nwd|nwc|rvt|ifc|zip)$/i, '')
+    .replace(/\.(nwd|nwc|rvt|ifc|glb|gltf|obj|stl|nwdjson|zip)$/i, '')
     .replace(/[^a-zA-Z0-9._-]/g, '_');
 
   return {
@@ -486,7 +485,55 @@ export async function exportModelAsZip(modelId, onProgress) {
 }
 
 /**
- * Meng-import file `.nwdpack.zip` (atau `.zip` hasil ekstraksi SVF bubble standar)
+ * Menyimpan file 3D/BIM lokal (.IFC, .GLB, .GLTF, .OBJ, .STL, .NWDJSON)
+ * langsung ke IndexedDB tanpa memerlukan Cloud / Kartu Kredit APS.
+ * @param {File} file
+ * @param {(progress: {percent: number, message: string}) => void} [onProgress]
+ * @returns {Promise<Object>} Metadata model yang tersimpan
+ */
+export async function importDirectLocal3DFile(file, onProgress) {
+  if (onProgress) {
+    onProgress({ percent: 15, message: `Membaca file lokal ${file.name}...` });
+  }
+
+  const arrayBuffer = await file.arrayBuffer();
+  const modelId = `model_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+  const safePath = `local_model/${file.name.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
+
+  if (onProgress) {
+    onProgress({ percent: 60, message: `Menyimpan ${file.name} ke IndexedDB...` });
+  }
+
+  await saveModelFilesBatch(modelId, [
+    {
+      path: safePath,
+      data: arrayBuffer,
+      mime: inferMimeType(safePath)
+    }
+  ]);
+
+  const savedMeta = await saveModelMetadata({
+    id: modelId,
+    name: file.name,
+    urn: '',
+    svfPath: `local3d://${safePath}`,
+    viewables: [{ name: file.name, path: `local3d://${safePath}`, role: '3d' }],
+    fileCount: 1,
+    totalSize: arrayBuffer.byteLength,
+    createdAt: new Date().toISOString(),
+    source: 'local3d',
+    isDemo: false
+  });
+
+  if (onProgress) {
+    onProgress({ percent: 100, message: `File ${file.name} siap dibuka secara 100% Offline!` });
+  }
+
+  return savedMeta;
+}
+
+/**
+ * Meng-import file `.nwdpack.zip` (atau `.zip` hasil ekstraksi SVF bubble maupun file 3D lokal)
  * langsung ke dalam IndexedDB secara 100% Offline.
  * @param {File|Blob} zipFile
  * @param {(progress: {percent: number, message: string}) => void} [onProgress]
@@ -511,44 +558,56 @@ export async function importModelFromZip(zipFile, onProgress) {
       const text = await manifestEntry.async('string');
       manifestData = JSON.parse(text);
     } catch (err) {
-      console.warn('Gagal mem-parsing nwdpack-manifest.json, melanjutkan auto-detect SVF:', err);
+      console.warn('Gagal mem-parsing nwdpack-manifest.json, melanjutkan auto-detect:', err);
     }
   }
 
   const allEntries = [];
   const detectedSvfPaths = [];
+  const detectedLocal3dPaths = [];
 
   zip.forEach((relativePath, zipEntry) => {
     if (zipEntry.dir) return;
     const normPath = normalizeSvfPath(relativePath);
     if (!normPath || normPath === 'nwdpack-manifest.json') return;
-    // Abaikan file metadata macOS
     if (normPath.startsWith('__MACOSX/') || normPath.endsWith('.DS_Store')) return;
 
     allEntries.push({ normPath, zipEntry });
-    if (normPath.toLowerCase().endsWith('.svf')) {
+    const lower = normPath.toLowerCase();
+    if (lower.endsWith('.svf')) {
       detectedSvfPaths.push(normPath);
+    } else if (/\.(glb|gltf|ifc|obj|stl|nwdjson)$/i.test(lower)) {
+      detectedLocal3dPaths.push(normPath);
     }
   });
 
   const isDemoModel = Boolean(manifestData?.model?.isDemo);
+  const isLocal3dManifest =
+    manifestData?.model?.source === 'local3d' ||
+    String(manifestData?.model?.svfPath || '').startsWith('local3d://');
 
   if (allEntries.length === 0 && !isDemoModel) {
     throw new Error('File ZIP kosong atau tidak memiliki file model 3D.');
   }
 
-  // Tentukan primary svfPath
-  let primarySvfPath = manifestData?.model?.svfPath
-    ? normalizeSvfPath(manifestData.model.svfPath)
-    : '';
+  let primarySvfPath = manifestData?.model?.svfPath || '';
+  let resolvedSource = manifestData?.model?.source || 'zip';
 
-  if (!primarySvfPath && detectedSvfPaths.length > 0) {
-    primarySvfPath = detectedSvfPaths[0];
+  if (isLocal3dManifest) {
+    resolvedSource = 'local3d';
+  } else if (!primarySvfPath && detectedSvfPaths.length > 0) {
+    primarySvfPath = normalizeSvfPath(detectedSvfPaths[0]);
+    resolvedSource = 'zip';
+  } else if (!primarySvfPath && detectedLocal3dPaths.length > 0) {
+    primarySvfPath = `local3d://${normalizeSvfPath(detectedLocal3dPaths[0])}`;
+    resolvedSource = 'local3d';
+  } else if (primarySvfPath && !primarySvfPath.startsWith('local3d://')) {
+    primarySvfPath = normalizeSvfPath(primarySvfPath);
   }
 
   if (!primarySvfPath && !isDemoModel) {
     throw new Error(
-      'Tidak ditemukan file .svf di dalam arsip ZIP. Pastikan ZIP berasal dari Export NWD Offline Viewer atau ekstraksi SVF Bubble.'
+      'Tidak ditemukan file .svf, .ifc, .glb, .obj, .stl, atau .nwdjson di dalam arsip ZIP.'
     );
   }
 
@@ -567,12 +626,12 @@ export async function importModelFromZip(zipFile, onProgress) {
     const arrayBuffer = await zipEntry.async('arraybuffer');
     totalBytes += arrayBuffer.byteLength;
 
-    // Jika archive menyimpan di bawah folder 'files/', normalkan agar cocok dengan svfPath
     let targetPath = normPath;
     if (
       targetPath.startsWith('files/') &&
       primarySvfPath &&
-      !primarySvfPath.startsWith('files/')
+      !primarySvfPath.startsWith('files/') &&
+      !primarySvfPath.startsWith('local3d://files/')
     ) {
       targetPath = normalizeSvfPath(targetPath.slice('files/'.length));
     }
@@ -615,7 +674,7 @@ export async function importModelFromZip(zipFile, onProgress) {
     fileCount: allEntries.length,
     totalSize: totalBytes || manifestData?.model?.totalSize || 0,
     createdAt: new Date().toISOString(),
-    source: isDemoModel ? 'demo' : 'zip',
+    source: isDemoModel ? 'demo' : resolvedSource,
     isDemo: isDemoModel,
     demoConfig: manifestData?.model?.demoConfig || null
   });

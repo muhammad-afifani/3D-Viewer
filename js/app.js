@@ -15,10 +15,13 @@ import {
   deleteOfflineModel,
   exportModelAsZip,
   importModelFromZip,
+  importDirectLocal3DFile,
   saveModelMetadata,
   getStorageQuotaInfo,
   formatBytes
 } from './storage.js';
+
+import { getFreeAutodeskViewerExtractorScript } from './local-loaders.js';
 
 import {
   getSavedCredentials,
@@ -86,7 +89,7 @@ function cacheDomElements() {
   dom.badgeModelCount = document.getElementById('badgeModelCount');
   dom.badgeViewpointCount = document.getElementById('badgeViewpointCount');
 
-  // Tab 1: Offline Library & ZIP Importer
+  // Tab 1: Offline Library & ZIP/Local 3D Importer
   dom.dropzoneZip = document.getElementById('dropzoneZip');
   dom.inputZipFile = document.getElementById('inputZipFile');
   dom.zipProgressBox = document.getElementById('zipProgressBox');
@@ -96,7 +99,9 @@ function cacheDomElements() {
   dom.btnCreateDemoModel = document.getElementById('btnCreateDemoModel');
   dom.storageQuotaLabel = document.getElementById('storageQuotaLabel');
 
-  // Tab 2: Cloud NWD Converter (APS)
+  // Tab 2: Free NWD Extractor & Cloud NWD Converter (APS)
+  dom.btnCopyFreeExtractor = document.getElementById('btnCopyFreeExtractor');
+  dom.bookmarkletFreeExtractor = document.getElementById('bookmarkletFreeExtractor');
   dom.dropzoneNwd = document.getElementById('dropzoneNwd');
   dom.inputNwdFile = document.getElementById('inputNwdFile');
   dom.pipelineCard = document.getElementById('pipelineCard');
@@ -523,10 +528,26 @@ async function handleNwdCloudToOfflinePipeline(file) {
     return;
   }
 
+  // Jika file adalah format 3D lokal (.ifc, .glb, .gltf, .obj, .stl, .nwdjson, .zip),
+  // proses langsung secara 100% Offline tanpa memerlukan kredensial APS!
+  const lowerName = String(file.name || '').toLowerCase();
   const creds = getActiveApsCredentials();
+  if (
+    /\.(ifc|glb|gltf|obj|stl|nwdjson|zip)$/i.test(lowerName) &&
+    (!creds.clientId || !creds.clientSecret)
+  ) {
+    switchSidebarTab('tabLibrary');
+    await handleImportZipPackage(file);
+    return;
+  }
+
   if (!creds.clientId || !creds.clientSecret) {
-    showToast('Masukkan APS Client ID & Client Secret terlebih dahulu!', 'warning');
-    openSettingsModal();
+    showToast(
+      'Untuk file .NWD mentah tanpa APS Key, gunakan Opsi 1 (Ekstrak Gratis via viewer.autodesk.com) di atas, atau isi APS Key.',
+      'warning',
+      6000
+    );
+    switchSidebarTab('tabCloud');
     return;
   }
 
@@ -663,27 +684,42 @@ async function handleDownloadExistingUrnToOffline() {
 }
 
 /**
- * Meng-handle Import file `.nwdpack.zip` / `.zip` ke IndexedDB untuk mode 100% Offline.
- * @param {File} zipFile
+ * Meng-handle Import file `.nwdpack.zip` / `.zip` ATAU file 3D lokal langsung
+ * (`.ifc`, `.glb`, `.gltf`, `.obj`, `.stl`, `.nwdjson`) ke IndexedDB untuk mode 100% Offline.
+ * @param {File} inputFile
  */
-async function handleImportZipPackage(zipFile) {
-  if (!zipFile) return;
+async function handleImportZipPackage(inputFile) {
+  if (!inputFile) return;
+  const lower = String(inputFile.name || '').toLowerCase();
+
   try {
     dom.zipProgressBox.style.display = 'flex';
     dom.zipProgressFill.style.width = '5%';
-    dom.zipProgressText.textContent = `Mengekstrak ${zipFile.name}...`;
+    dom.zipProgressText.textContent = `Memproses ${inputFile.name}...`;
 
-    const savedMeta = await importModelFromZip(zipFile, (prog) => {
-      dom.zipProgressFill.style.width = `${prog.percent}%`;
-      dom.zipProgressText.textContent = prog.message;
-    });
+    let savedMeta;
+    if (lower.endsWith('.zip')) {
+      savedMeta = await importModelFromZip(inputFile, (prog) => {
+        dom.zipProgressFill.style.width = `${prog.percent}%`;
+        dom.zipProgressText.textContent = prog.message;
+      });
+    } else if (/\.(ifc|glb|gltf|obj|stl|nwdjson|json)$/i.test(lower)) {
+      savedMeta = await importDirectLocal3DFile(inputFile, (prog) => {
+        dom.zipProgressFill.style.width = `${prog.percent}%`;
+        dom.zipProgressText.textContent = prog.message;
+      });
+    } else {
+      throw new Error(
+        `Format "${inputFile.name}" tidak dapat dibuka langsung. Untuk file .NWD tanpa kartu kredit, gunakan Opsi 1 pada tab Cloud .NWD.`
+      );
+    }
 
     await refreshOfflineLibraryUI();
-    showToast(`Paket "${savedMeta.name}" berhasil di-import ke IndexedDB!`, 'success');
+    showToast(`Model "${savedMeta.name}" berhasil disimpan ke IndexedDB!`, 'success');
     await handleOpenOfflineModel(savedMeta.id);
   } catch (err) {
-    console.error('Import ZIP error:', err);
-    showToast(err.message || 'Gagal meng-import paket .zip.', 'error', 6000);
+    console.error('Import Offline File error:', err);
+    showToast(err.message || 'Gagal memproses file 3D.', 'error', 6000);
   } finally {
     setTimeout(() => {
       dom.zipProgressBox.style.display = 'none';
@@ -953,6 +989,42 @@ function bindEventListeners() {
   dom.btnCreateDemoModel.addEventListener('click', handleCreateAndOpenDemoModel);
   dom.btnEmptyLoadDemo.addEventListener('click', handleCreateAndOpenDemoModel);
 
+  // Free .NWD Extractor (No Credit Card via viewer.autodesk.com)
+  const extractorCode = getFreeAutodeskViewerExtractorScript();
+  if (dom.bookmarkletFreeExtractor) {
+    dom.bookmarkletFreeExtractor.href = `javascript:${encodeURIComponent(extractorCode)}`;
+    dom.bookmarkletFreeExtractor.addEventListener('click', (e) => {
+      e.preventDefault();
+      showToast(
+        'Tarik (Drag) tombol Bookmarklet ini ke Bookmarks Bar browser Anda, atau klik "Copy Script Ekstraktor .NWD" di sebelahnya!',
+        'info',
+        5000
+      );
+    });
+  }
+
+  if (dom.btnCopyFreeExtractor) {
+    dom.btnCopyFreeExtractor.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(extractorCode);
+        showToast(
+          'Script Ekstraktor .NWD berhasil disalin! Buka viewer.autodesk.com, tekan F12 (Console), Paste, lalu tekan Enter.',
+          'success',
+          6500
+        );
+      } catch {
+        // Fallback jika clipboard API diblokir
+        const ta = document.createElement('textarea');
+        ta.value = extractorCode;
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        ta.remove();
+        showToast('Script Ekstraktor .NWD berhasil disalin ke Clipboard!', 'success', 5000);
+      }
+    });
+  }
+
   // Empty Overlay Quick Buttons
   dom.btnEmptyImportZip.addEventListener('click', () => {
     switchSidebarTab('tabLibrary');
@@ -960,7 +1032,6 @@ function bindEventListeners() {
   });
   dom.btnEmptyConvertNwd.addEventListener('click', () => {
     switchSidebarTab('tabCloud');
-    dom.inputNwdFile.click();
   });
 
   // Cloud URN Actions
