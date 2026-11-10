@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0b111e"/>
+      <stop offset="100%" stop-color="#152238"/>
+    </linearGradient>
+    <linearGradient id="cubeTop" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8"/>
+      <stop offset="100%" stop-color="#0284c7"/>
+    </linearGradient>
+    <linearGradient id="cubeLeft" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0284c7"/>
+      <stop offset="100%" stop-color="#0369a1"/>
+    </linearGradient>
+    <linearGradient id="cubeRight" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#075985"/>
+      <stop offset="100%" stop-color="#0c4a6e"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="96" fill="url(#bg)" stroke="#1e3a5f" stroke-width="8"/>
+  <!-- Isometric 3D CAD Cube -->
+  <polygon points="256,88 412,178 256,268 100,178" fill="url(#cubeTop)"/>
+  <polygon points="100,178 256,268 256,436 100,346" fill="url(#cubeLeft)"/>
+  <polygon points="256,268 412,178 412,346 256,436" fill="url(#cubeRight)"/>
+  <!-- Wireframe CAD Pipe / Axis Overlay -->
+  <polyline points="256,88 412,178 412,346 256,436 100,346 100,178 256,88" fill="none" stroke="#7dd3fc" stroke-width="6" stroke-linejoin="round"/>
+  <line x1="256" y1="268" x2="256" y2="436" stroke="#7dd3fc" stroke-width="6"/>
+  <line x1="100" y1="178" x2="256" y2="268" stroke="#7dd3fc" stroke-width="6"/>
+  <line x1="412" y1="178" x2="256" y2="268" stroke="#7dd3fc" stroke-width="6"/>
+  <!-- Offline Badge -->
+  <circle cx="388" cy="388" r="64" fill="#0f172a" stroke="#10b981" stroke-width="8"/>
+  <path d="M388 352 v44 M368 380 l20 20 l20 -20 M364 412 h48" fill="none" stroke="#10b981" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

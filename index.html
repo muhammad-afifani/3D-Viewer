@@ -1,0 +1,617 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="theme-color" content="#0b0f17" />
+  <meta name="description" content="Progressive Web App (PWA) untuk konversi dan visualisasi 3D model Autodesk Navisworks (.nwd) secara 100% Offline di browser maupun Cloud via Autodesk Platform Services (APS)." />
+  <title>NWD Offline &amp; Cloud Web Viewer — CAD/BIM Workstation</title>
+
+  <!-- PWA Manifest & Icons -->
+  <link rel="manifest" href="./manifest.json" />
+  <link rel="icon" type="image/svg+xml" href="./assets/icon.svg" />
+  <link rel="apple-touch-icon" href="./assets/icon.svg" />
+
+  <!-- Typography: Inter & JetBrains Mono -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+
+  <!-- Autodesk Forge / APS Viewer v7 Stylesheet (Cached by Service Worker for Offline Use) -->
+  <link rel="stylesheet" href="https://developer.api.autodesk.com/modelderivative/v2/viewers/7.*/style.min.css" type="text/css" />
+
+  <!-- Custom Workstation Stylesheet -->
+  <link rel="stylesheet" href="./css/styles.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <!-- ====================================================================
+         1. TOP APPLICATION HEADER
+         ==================================================================== -->
+    <header class="app-header">
+      <div class="header-left">
+        <button id="btnToggleSidebar" class="sidebar-toggle-btn" title="Sembunyikan / Tampilkan Panel Kiri">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="3" y="3" width="18" height="18" rx="2" />
+            <line x1="9" y1="3" x2="9" y2="21" />
+          </svg>
+        </button>
+        <div class="brand-group">
+          <img src="./assets/icon.svg" alt="NWD Viewer Logo" class="brand-logo" />
+          <div class="brand-titles">
+            <h1>NWD Offline &amp; Cloud Web Viewer</h1>
+            <span class="brand-subtitle">Hybrid APS SVF Extractor &bull; IndexedDB Virtual Server</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="header-center">
+        <div id="networkStatusPill" class="status-pill online" title="Status Koneksi Jaringan">
+          <span class="status-dot"></span>
+          <span id="networkStatusText">ONLINE (Cloud + Local)</span>
+        </div>
+        <div id="swStatusPill" class="status-pill" title="Status Service Worker Virtual Server (/local-svf/)">
+          <span class="status-dot"></span>
+          <span id="swStatusText">SW: Memuat...</span>
+        </div>
+        <div id="apsStatusPill" class="status-pill" title="Status Kredensial Autodesk Platform Services">
+          <span class="status-dot"></span>
+          <span id="apsStatusText">APS Key: Belum Diatur</span>
+        </div>
+      </div>
+
+      <div class="header-right">
+        <button id="btnInstallPwa" class="btn btn-success btn-sm" style="display: none;" title="Install sebagai Aplikasi Desktop mandiri di Chrome/Edge">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+            <polyline points="7 10 12 15 17 10" />
+            <line x1="12" y1="15" x2="12" y2="3" />
+          </svg>
+          <span>Install PWA</span>
+        </button>
+
+        <button id="btnCacheEngine" class="btn btn-sm" title="Pastikan seluruh file Engine 3D Autodesk Viewer v7 tersimpan di Cache Browser sebelum Anda pergi Offline">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 2v10l4-4M12 12l-4-4" />
+            <path d="M20 17.58A5 5 0 0 0 18 8h-1.26A8 8 0 1 0 4 16.25" />
+          </svg>
+          <span>Cache Engine Offline</span>
+        </button>
+
+        <button id="btnOpenSettings" class="btn btn-sm" title="Konfigurasi APS Client ID &amp; Client Secret">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="3" />
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
+          </svg>
+          <span>APS Settings</span>
+        </button>
+
+        <button id="btnOpenHelp" class="btn btn-sm" title="Panduan Penggunaan Online Converter &amp; 100% Offline Mode">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="10" />
+            <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" />
+            <line x1="12" y1="17" x2="12.01" y2="17" />
+          </svg>
+          <span>Panduan</span>
+        </button>
+      </div>
+    </header>
+
+    <!-- ====================================================================
+         2. MAIN WORKSPACE BODY (SIDEBAR + 3D VIEWPORT)
+         ==================================================================== -->
+    <div class="workspace-body">
+      <!-- LEFT SIDEBAR -->
+      <aside id="appSidebar" class="sidebar">
+        <!-- Sidebar Navigation Tabs -->
+        <nav class="sidebar-tabs" aria-label="Sidebar Navigation">
+          <button class="sidebar-tab active" data-tab="tabLibrary">
+            <span>Offline Library</span>
+            <span id="badgeModelCount" class="tab-badge">0</span>
+          </button>
+          <button class="sidebar-tab" data-tab="tabCloud">
+            <span>Cloud .NWD</span>
+          </button>
+          <button class="sidebar-tab" data-tab="tabViewpoints">
+            <span>Viewpoints</span>
+            <span id="badgeViewpointCount" class="tab-badge">0</span>
+          </button>
+        </nav>
+
+        <div class="sidebar-content">
+          <!-- ==============================================================
+               TAB 1: OFFLINE LIBRARY & .NWDPACK.ZIP IMPORTER
+               ============================================================== -->
+          <div id="tabLibrary" class="tab-pane active">
+            <!-- Import Offline ZIP Package -->
+            <div class="panel-section">
+              <div class="section-header">
+                <span class="section-title">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                    <polyline points="17 8 12 3 7 8" />
+                    <line x1="12" y1="3" x2="12" y2="15" />
+                  </svg>
+                  Import Paket Offline (.zip)
+                </span>
+                <span class="badge badge-offline">100% OFFLINE</span>
+              </div>
+              <p class="section-desc">
+                Buka file <code>.nwdpack.zip</code> (atau arsip <code>.zip</code> bubble SVF) dari Flashdisk/lokal tanpa memerlukan internet sama sekali.
+              </p>
+
+              <div id="dropzoneZip" class="dropzone">
+                <input id="inputZipFile" type="file" accept=".zip,application/zip" />
+                <div class="dropzone-icon">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                    <polyline points="14 2 14 8 20 8" />
+                    <line x1="12" y1="18" x2="12" y2="12" />
+                    <line x1="9" y1="15" x2="15" y2="15" />
+                  </svg>
+                </div>
+                <div class="dropzone-title">Drag &amp; Drop file .nwdpack.zip di sini</div>
+                <div class="dropzone-hint">atau klik untuk memilih dari komputer</div>
+              </div>
+
+              <!-- Progress Bar Ekstraksi ZIP -->
+              <div id="zipProgressBox" class="pipeline-card" style="display: none;">
+                <div id="zipProgressText" class="pipeline-filename">Mengekstrak paket ZIP...</div>
+                <div class="progress-track">
+                  <div id="zipProgressFill" class="progress-fill"></div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Daftar Model Tersimpan di IndexedDB -->
+            <div class="panel-section">
+              <div class="section-header">
+                <span class="section-title">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <ellipse cx="12" cy="5" rx="9" ry="3" />
+                    <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3" />
+                    <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5" />
+                  </svg>
+                  IndexedDB Offline Library
+                </span>
+                <span id="storageQuotaLabel" style="font-size: 10.5px; color: var(--text-muted); font-family: var(--font-mono);">0 Model</span>
+              </div>
+
+              <div id="offlineModelList" class="model-list"></div>
+
+              <button id="btnCreateDemoModel" class="btn btn-sm" style="width: 100%; margin-top: 4px;">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <polygon points="12 2 2 7 12 12 22 7 12 2" />
+                  <polyline points="2 17 12 22 22 17" />
+                  <polyline points="2 12 12 17 22 12" />
+                </svg>
+                <span>Muat Model 3D Demo Industrial Plant (Offline)</span>
+              </button>
+            </div>
+          </div>
+
+          <!-- ==============================================================
+               TAB 2: CLOUD NWD TRANSLATOR & SVF BUBBLE EXTRACTOR
+               ============================================================== -->
+          <div id="tabCloud" class="tab-pane">
+            <div class="panel-section">
+              <div class="section-header">
+                <span class="section-title">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z" />
+                  </svg>
+                  NWD Cloud Translator &amp; Extractor
+                </span>
+                <span class="badge badge-cloud">APS REST API</span>
+              </div>
+              <p class="section-desc">
+                Unggah file mentah <code>.nwd</code> (atau <code>.nwc</code> / <code>.rvt</code> / <code>.ifc</code>). Aplikasi akan menerjemahkannya ke <code>.svf</code> di Autodesk Cloud lalu mengunduh seluruh bubble ke IndexedDB untuk dipakai <strong>100% Offline</strong>.
+              </p>
+
+              <div id="dropzoneNwd" class="dropzone">
+                <input id="inputNwdFile" type="file" accept=".nwd,.nwc,.rvt,.ifc,.dwg,.stp,.step,.iam,.ipt" />
+                <div class="dropzone-icon">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                    <polyline points="17 8 12 3 7 8" />
+                    <line x1="12" y1="3" x2="12" y2="15" />
+                  </svg>
+                </div>
+                <div class="dropzone-title">Drag &amp; Drop file .NWD di sini</div>
+                <div class="dropzone-hint">Mendukung .nwd, .nwc, .rvt, .ifc (Signed S3 Chunked Upload)</div>
+              </div>
+
+              <!-- 4-Step Real-Time Progress Pipeline -->
+              <div id="pipelineCard" class="pipeline-card" style="display: none;">
+                <div class="pipeline-header">
+                  <span id="pipelineFilename" class="pipeline-filename">Model.nwd</span>
+                  <span id="pipelinePercent" class="pipeline-percent">0%</span>
+                </div>
+                <div class="progress-track">
+                  <div id="pipelineProgressFill" class="progress-fill"></div>
+                </div>
+                <div class="pipeline-steps">
+                  <div id="pipelineStep1" class="pipeline-step">
+                    <span class="step-indicator">1</span>
+                    <span>Authenticating APS (2-Legged OAuth2)</span>
+                  </div>
+                  <div id="pipelineStep2" class="pipeline-step">
+                    <span class="step-indicator">2</span>
+                    <span>Uploading .nwd to OSS Bucket (Signed S3)</span>
+                  </div>
+                  <div id="pipelineStep3" class="pipeline-step">
+                    <span class="step-indicator">3</span>
+                    <span>Translating .nwd to SVF (Manifest Polling)</span>
+                  </div>
+                  <div id="pipelineStep4" class="pipeline-step">
+                    <span class="step-indicator">4</span>
+                    <span>Downloading SVF Bubble to IndexedDB</span>
+                  </div>
+                </div>
+                <div id="pipelineLog" class="pipeline-log"></div>
+              </div>
+            </div>
+
+            <!-- Ambil langsung dari Base64 URN yang sudah ada -->
+            <div class="panel-section">
+              <div class="section-header">
+                <span class="section-title">Muat / Ekstrak dari URN Cloud</span>
+              </div>
+              <p class="section-desc">
+                Jika Anda sudah memiliki Base64 URN dari model yang pernah ditranslasi di APS, tempelkan di bawah untuk diunduh ke IndexedDB:
+              </p>
+              <input id="inputCloudUrn" type="text" class="form-input" placeholder="Contoh: dXJuOmFkc2sub2JqZWN0czpvcy5vYmplY3Q6..." />
+              <div style="display: flex; gap: 6px;">
+                <button id="btnDownloadUrnOffline" class="btn btn-primary btn-sm" style="flex: 1;">
+                  Simpan Offline (IndexedDB)
+                </button>
+                <button id="btnOpenUrnCloud" class="btn btn-sm">
+                  Buka Cloud
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <!-- ==============================================================
+               TAB 3: SAVED VIEWPOINTS & BIM INSPECTOR
+               ============================================================== -->
+          <div id="tabViewpoints" class="tab-pane">
+            <!-- Saved Viewpoints -->
+            <div class="panel-section">
+              <div class="section-header">
+                <span class="section-title">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z" />
+                  </svg>
+                  Saved Viewpoints
+                </span>
+              </div>
+              <p class="section-desc">
+                Simpan posisi kamera, orientasi orbit, potongan Section Plane/Box, serta elemen yang di-isolate ke penyimpanan lokal browser.
+              </p>
+              <div style="display: flex; gap: 6px;">
+                <input id="inputViewpointName" type="text" class="form-input" style="flex: 1; height: 30px;" placeholder="Nama Viewpoint (misal: Pompa P-1004A)..." />
+                <button id="btnAddViewpointSidebar" class="btn btn-primary btn-sm">Simpan</button>
+              </div>
+              <div id="viewpointsList" class="model-list"></div>
+            </div>
+
+            <!-- Quick BIM Selection Inspector -->
+            <div class="panel-section">
+              <div class="section-header">
+                <span class="section-title">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <circle cx="12" cy="12" r="10" />
+                    <line x1="12" y1="16" x2="12" y2="12" />
+                    <line x1="12" y1="8" x2="12.01" y2="8" />
+                  </svg>
+                  Selected Object Metadata
+                </span>
+              </div>
+              <div id="selectionInspectorBox">
+                <div class="section-desc">
+                  Klik elemen peralatan, pipa, valve, atau struktur baja di 3D Viewport untuk menginspeksi metadata BIM.
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </aside>
+
+      <!-- ==================================================================
+           3. CENTER 3D VIEWPORT & CUSTOM CAD TOOLBAR
+           ================================================================== -->
+      <main class="viewport-area">
+        <!-- Custom CAD Top Toolbar -->
+        <div class="cad-toolbar">
+          <!-- Group Kiri: Search & Isolate -->
+          <div class="toolbar-group">
+            <div class="search-box">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color: var(--text-muted); flex-shrink: 0;">
+                <circle cx="11" cy="11" r="8" />
+                <line x1="21" y1="21" x2="16.65" y2="16.65" />
+              </svg>
+              <input id="inputSearchModel" type="text" placeholder="Cari item / pipa / tag (Enter)..." />
+              <span id="searchMatchCount" class="search-count"></span>
+            </div>
+            <button id="btnSearchModel" class="btn btn-sm" title="Cari &amp; Isolate Objek">Cari</button>
+            <button id="btnSearchPrev" class="btn btn-icon btn-sm" title="Hasil Sebelumnya">&lsaquo;</button>
+            <button id="btnSearchNext" class="btn btn-icon btn-sm" title="Hasil Berikutnya">&rsaquo;</button>
+          </div>
+
+          <div class="toolbar-divider"></div>
+
+          <!-- Group Tengah: Visibilitas & Navigasi Ala Navisworks -->
+          <div class="toolbar-group">
+            <button id="btnFitView" class="btn btn-sm" title="Fit to View (Zoom ke objek terpilih atau seluruh model)">
+              Fit View
+            </button>
+            <button id="btnIsolate" class="btn btn-sm" title="Isolate Objek yang Dipilih">
+              Isolate
+            </button>
+            <button id="btnHide" class="btn btn-sm" title="Sembunyikan (Hide) Objek yang Dipilih">
+              Hide
+            </button>
+            <button id="btnShowAll" class="btn btn-sm" title="Tampilkan Kembali Seluruh Elemen Model (Reset Isolate/Hide)">
+              Show All
+            </button>
+            <button id="btnGhosting" class="btn btn-primary btn-sm" title="Aktifkan/Nonaktifkan Efek Ghosting Transparan">
+              Ghosting
+            </button>
+
+            <div class="toolbar-divider"></div>
+
+            <button id="btnWalkMode" class="btn btn-sm" title="First-Person Walkthrough (Navisworks BIM Walk dengan kontrol WASD + Mouse)">
+              Walk (WASD)
+            </button>
+            <button id="btnProjection" class="btn btn-sm" title="Ganti Proyeksi Kamera (Perspective / Orthographic)">
+              Persp
+            </button>
+
+            <!-- Explode Slider -->
+            <div style="display: inline-flex; align-items: center; gap: 5px; padding: 0 6px;" title="Explode 3D Assembly">
+              <span style="font-size: 11px; color: var(--text-muted);">Explode</span>
+              <input id="rangeExplode" type="range" min="0" max="1" step="0.02" value="0" style="width: 68px; cursor: pointer;" />
+              <span id="explodeValueLabel" style="font-family: var(--font-mono); font-size: 10.5px; color: var(--text-secondary); min-width: 28px;">0%</span>
+            </div>
+          </div>
+
+          <!-- Group Kanan: Theme Switcher & Quick Bookmark -->
+          <div class="toolbar-group">
+            <select id="selectTheme" class="select-control" aria-label="Pilih Tema Lingkungan 3D" title="Ubah Tema Latar Belakang 3D Viewport">
+              <option value="dark">Theme: Dark CAD</option>
+              <option value="light">Theme: Technical Light</option>
+              <option value="sky">Theme: Sky Daylight</option>
+            </select>
+
+            <button id="btnQuickSaveViewpoint" class="btn btn-sm" title="Simpan Posisi Kamera &amp; Potongan Section Saat Ini">
+              + Viewpoint
+            </button>
+          </div>
+        </div>
+
+        <!-- 3D Viewer Stage -->
+        <div class="viewer-stage">
+          <!-- Container Utama Autodesk Viewer v7 -->
+          <div id="forgeViewer"></div>
+
+          <!-- First-Person Walk HUD Banner -->
+          <div id="walkHudBanner" class="walk-hud-banner hidden">
+            <span>
+              <strong>First-Person BIM Walk Aktif:</strong> Gunakan <span class="kbd">W</span><span class="kbd">A</span><span class="kbd">S</span><span class="kbd">D</span> untuk bergerak, <span class="kbd">Q</span>/<span class="kbd">E</span> naik/turun, <span class="kbd">Shift</span> lari, dan tahan <strong>Klik Kiri Mouse</strong> untuk melihat sekeliling.
+            </span>
+            <button id="btnExitWalkHud" class="btn btn-danger btn-sm">Keluar Walk</button>
+          </div>
+
+          <!-- Empty State Overlay (Muncul sebelum model dimuat) -->
+          <div id="viewerEmptyOverlay" class="viewer-empty-overlay">
+            <div class="empty-stage-card">
+              <div class="empty-stage-header">
+                <div class="empty-stage-icon">
+                  <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                    <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
+                    <polyline points="3.27 6.96 12 12.01 20.73 6.96" />
+                    <line x1="12" y1="22.08" x2="12" y2="12" />
+                  </svg>
+                </div>
+                <div>
+                  <h2 class="empty-stage-title">Siap Memuat Model 3D Navisworks (.NWD / .SVF)</h2>
+                  <p class="empty-stage-subtitle">
+                    Berjalan 100% di dalam browser tanpa instalasi aplikasi <code>.exe</code> maupun hak akses Admin. Pilih salah satu alur kerja di bawah ini:
+                  </p>
+                </div>
+              </div>
+
+              <div class="workflow-grid">
+                <div class="workflow-box">
+                  <h3>
+                    <span class="badge badge-offline">100% OFFLINE</span>
+                    <span>Buka Paket .nwdpack.zip</span>
+                  </h3>
+                  <p>
+                    Tidak ada internet di laptop kantor? Import file <code>.nwdpack.zip</code> dari Flashdisk ke IndexedDB dan buka langsung melalui Virtual Server Service Worker.
+                  </p>
+                  <button id="btnEmptyImportZip" class="btn btn-primary btn-sm">
+                    Import Paket .zip Offline
+                  </button>
+                </div>
+
+                <div class="workflow-box">
+                  <h3>
+                    <span class="badge badge-cloud">MODE ONLINE</span>
+                    <span>Konversi File Mentah .NWD</span>
+                  </h3>
+                  <p>
+                    Gunakan akun gratis Autodesk Platform Services (APS) untuk menerjemahkan file <code>.nwd</code> ke <code>.svf</code> dan mengunduh seluruh bubble untuk penggunaan offline.
+                  </p>
+                  <button id="btnEmptyConvertNwd" class="btn btn-sm">
+                    Upload &amp; Konversi .NWD
+                  </button>
+                </div>
+              </div>
+
+              <div class="empty-stage-footer">
+                <span style="font-size: 11.5px; color: var(--text-muted);">
+                  Ingin langsung mencoba fitur Orbit, Walk WASD, Section Box, Measure, &amp; Isolate sekarang?
+                </span>
+                <button id="btnEmptyLoadDemo" class="btn btn-success btn-sm">
+                  Buka Model 3D Demo Industrial Plant
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </main>
+    </div>
+
+    <!-- ====================================================================
+         4. BOTTOM ENGINEERING TELEMETRY STATUS BAR
+         ==================================================================== -->
+    <footer class="status-bar">
+      <div class="status-bar-left">
+        <span id="statusActiveModel" class="status-item">Model: <strong>Belum dimuat</strong></span>
+        <span>&bull;</span>
+        <span id="statusRenderMode" class="status-item">Mode: <strong>Standby</strong></span>
+        <span>&bull;</span>
+        <span id="statusSelectedElement" class="status-item">Seleksi: <strong>Tidak ada</strong></span>
+      </div>
+      <div class="status-bar-right">
+        <span id="statusStorageInfo" class="status-item">IndexedDB: <strong>0 B</strong></span>
+        <span>&bull;</span>
+        <span class="status-item">Engine: <strong>APS Viewer v7 + SW Virtual Server</strong></span>
+      </div>
+    </footer>
+  </div>
+
+  <!-- ======================================================================
+       5. MODAL: APS CREDENTIALS MANAGER (SETTINGS)
+       ====================================================================== -->
+  <div id="modalSettings" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="modalSettingsTitle">
+    <div class="modal-dialog">
+      <div class="modal-header">
+        <div id="modalSettingsTitle" class="modal-title">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+            <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+          </svg>
+          <span>Autodesk Platform Services (APS) Credentials</span>
+        </div>
+        <button id="btnCloseSettings" class="btn btn-icon btn-sm" aria-label="Tutup">&times;</button>
+      </div>
+
+      <div class="modal-body">
+        <div class="info-banner">
+          <strong>Keamanan Client-Side:</strong> Kredensial Anda <u>tidak pernah</u> di-hardcode di kode GitHub dan hanya disimpan di <code>localStorage</code> browser laptop Anda untuk melakukan konversi file <code>.nwd</code> secara langsung ke server resmi Autodesk (<code>developer.api.autodesk.com</code>).<br />
+          <em>Catatan: Kredensial ini hanya diperlukan saat mengonversi file <code>.nwd</code> baru (Mode Online). Untuk membuka model dari IndexedDB atau file <code>.nwdpack.zip</code> (Mode 100% Offline), Anda tidak memerlukan kredensial ini.</em>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="inputApsClientId">
+            <span>APS Client ID</span>
+            <a href="https://aps.autodesk.com/myapps" target="_blank" rel="noopener noreferrer" style="color: var(--accent-primary); text-decoration: none; font-size: 11px;">
+              Buka Portal APS &rarr;
+            </a>
+          </label>
+          <input id="inputApsClientId" type="text" class="form-input" placeholder="Masukkan Client ID dari aps.autodesk.com..." autocomplete="off" />
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="inputApsClientSecret">
+            <span>APS Client Secret</span>
+          </label>
+          <input id="inputApsClientSecret" type="password" class="form-input" placeholder="Masukkan Client Secret..." autocomplete="off" />
+          <span class="form-help">
+            Pastikan aplikasi APS Anda memiliki akses ke <strong>Data Management API</strong> dan <strong>Model Derivative API</strong>.
+          </span>
+        </div>
+
+        <label class="checkbox-row">
+          <input id="chkRememberAps" type="checkbox" checked />
+          <span>Simpan kredensial di <code>localStorage</code> browser pada perangkat ini</span>
+        </label>
+
+        <div id="apsConnectionResult" class="connection-result"></div>
+      </div>
+
+      <div class="modal-footer">
+        <button id="btnTestAps" class="btn btn-sm">
+          Test Connection (2-Legged OAuth)
+        </button>
+        <div style="display: flex; gap: 8px;">
+          <button id="btnSaveAps" class="btn btn-primary btn-sm">
+            Simpan Kredensial
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ======================================================================
+       6. MODAL: PANDUAN PENGGUNAAN & ARSITEKTUR HYBRID OFFLINE
+       ====================================================================== -->
+  <div id="modalHelp" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="modalHelpTitle">
+    <div class="modal-dialog modal-lg">
+      <div class="modal-header">
+        <div id="modalHelpTitle" class="modal-title">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="10" />
+            <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" />
+            <line x1="12" y1="17" x2="12.01" y2="17" />
+          </svg>
+          <span>Panduan Kerja Hybrid Cloud-to-Offline (.NWD Viewer)</span>
+        </div>
+        <button id="btnCloseHelp" class="btn btn-icon btn-sm" aria-label="Tutup">&times;</button>
+      </div>
+
+      <div class="modal-body" style="line-height: 1.6;">
+        <div class="info-banner">
+          <strong>Mengapa Menggunakan Arsitektur Hybrid Cloud-to-Offline?</strong><br />
+          Format <code>.nwd</code> (Autodesk Navisworks) menggunakan kompresi biner proprietary tertutup milik Autodesk. Dengan arsitektur ini, Anda dapat mengonversi <code>.nwd</code> menjadi paket <code>.svf</code> menggunakan API resmi Autodesk saat ada internet, lalu menyimpannya ke <strong>IndexedDB</strong> atau mengekspornya menjadi satu file <strong><code>.nwdpack.zip</code></strong> agar dapat dibuka <strong>100% Offline</strong> di laptop kantor yang terkunci (tanpa admin &amp; tanpa internet).
+        </div>
+
+        <h3 style="font-size: 13px; color: var(--accent-primary);">1. Cara Konversi File .NWD &amp; Export ke .ZIP (Saat Ada Internet)</h3>
+        <ol style="padding-left: 18px; color: var(--text-secondary); font-size: 12px; display: flex; flex-direction: column; gap: 4px;">
+          <li>Buka menu <strong>APS Settings</strong> di kanan atas, masukkan <code>Client ID</code> dan <code>Client Secret</code> dari akun gratis <a href="https://aps.autodesk.com" target="_blank" rel="noopener" style="color: var(--accent-primary);">aps.autodesk.com</a>, lalu klik <strong>Test Connection</strong>.</li>
+          <li>Buka tab <strong>Cloud .NWD</strong> di sidebar kiri, lalu <em>Drag &amp; Drop</em> file <code>.nwd</code> Anda.</li>
+          <li>Aplikasi akan otomatis mengunggah file, menjalankan translasi SVF, mem-parsing <code>manifest.json</code> di dalam <code>0.svf</code>, dan mengunduh seluruh geometri (<code>.pf</code>, <code>.pack</code>), material, serta Property Database (<code>objects_*.json.gz</code>) ke <strong>IndexedDB</strong>.</li>
+          <li>Pada tab <strong>Offline Library</strong>, klik <strong>Export .zip</strong> untuk mengunduh file tunggal <code>NamaModel.nwdpack.zip</code> (bisa disimpan ke Flashdisk).</li>
+        </ol>
+
+        <h3 style="font-size: 13px; color: var(--accent-primary); margin-top: 6px;">2. Cara Buka Model 100% Offline di Laptop Kantor</h3>
+        <ol style="padding-left: 18px; color: var(--text-secondary); font-size: 12px; display: flex; flex-direction: column; gap: 4px;">
+          <li>Buka URL GitHub Pages aplikasi ini satu kali di Chrome/Edge laptop kantor (atau klik tombol <strong>Install PWA</strong> &amp; <strong>Cache Engine Offline</strong> di header atas).</li>
+          <li>Setelah ter-cache, aplikasi dapat dibuka kapan saja <strong>meskipun Wi-Fi/LAN dimatikan total</strong>.</li>
+          <li>Drag &amp; Drop file <code>.nwdpack.zip</code> dari Flashdisk ke kotak <strong>Import Paket Offline (.zip)</strong> di tab <strong>Offline Library</strong>, lalu klik <strong>Buka 3D (Offline)</strong>!</li>
+        </ol>
+
+        <h3 style="font-size: 13px; color: var(--accent-primary); margin-top: 6px;">3. Pintasan Kontrol 3D Navisworks Viewer</h3>
+        <ul style="padding-left: 18px; color: var(--text-secondary); font-size: 12px; display: flex; flex-direction: column; gap: 4px;">
+          <li><strong>Orbit / Putar:</strong> Tahan Klik Kiri Mouse + Geser.</li>
+          <li><strong>Pan / Geser:</strong> Tahan Tombol Tengah (Scroll Wheel) atau Shift + Klik Kiri.</li>
+          <li><strong>First-Person Walk:</strong> Klik tombol <code>Walk (WASD)</code> di toolbar, lalu gunakan tombol keyboard <code>W A S D</code> untuk berjalan menyusuri pabrik/pipa dan <code>Q / E</code> untuk naik/turun.</li>
+          <li><strong>Section Analysis &amp; Measure:</strong> Gunakan ikon penggaris (Measure) dan potongan bidang X/Y/Z atau Box (Section Analysis) pada toolbar mengambang di bagian bawah kanvas 3D.</li>
+        </ul>
+      </div>
+
+      <div class="modal-footer" style="justify-content: flex-end;">
+        <button id="btnCloseHelpFooter" class="btn btn-primary btn-sm">Mengerti &amp; Tutup</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast Notifications Container -->
+  <div id="toastContainer" class="toast-container"></div>
+
+  <!-- ======================================================================
+       7. EXTERNAL LIBRARIES & APPLICATION ENTRYPOINT
+       ====================================================================== -->
+  <!-- JSZip v3.10.1 untuk membaca internal 0.svf & membuat/mengekstrak .nwdpack.zip -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js" crossorigin="anonymous"></script>
+
+  <!-- Autodesk Forge / APS Viewer v7 Core SDK -->
+  <script src="https://developer.api.autodesk.com/modelderivative/v2/viewers/7.*/viewer3D.min.js" crossorigin="anonymous"></script>
+
+  <!-- Main ES Module Controller -->
+  <script type="module" src="./js/app.js"></script>
+</body>
+</html>
