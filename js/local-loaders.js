@@ -815,33 +815,7 @@ export async function parseLocal3DFile(arrayBuffer, fileName) {
     return parseIfcBuffer(arrayBuffer, fileName);
   }
   if (lower.endsWith('.nwdjson') || lower.endsWith('.json')) {
-    const text = new TextDecoder().decode(new Uint8Array(arrayBuffer));
-    const parsed = JSON.parse(text);
-    const rawMeshes = Array.isArray(parsed.meshes) ? parsed.meshes : [];
-    if (rawMeshes.length === 0) {
-      throw new Error('File JSON/NWDJSON tidak berisi daftar mesh 3D yang valid.');
-    }
-    return rawMeshes.map((m) => {
-      const positions = new Float32Array(m.positions || []);
-      const indices = m.indices ? new Uint32Array(m.indices) : null;
-      const normals = m.normals
-        ? new Float32Array(m.normals)
-        : computeVertexNormals(positions, indices);
-      return {
-        name: m.name || 'NWD Element',
-        category: m.category || 'Navisworks Component',
-        system: m.system || parsed.modelName || fileName,
-        materialName: m.materialName || 'Autodesk Material',
-        colorHex: Number(m.colorHex || 0x38bdf8),
-        positions,
-        normals,
-        indices,
-        specs: m.specs || {
-          'Item Name': m.name || 'NWD Element',
-          Source: 'Extracted from Autodesk Viewer'
-        }
-      };
-    });
+    return parseNwdPackageBuffer(arrayBuffer, fileName);
   }
 
   throw new Error(
@@ -850,17 +824,143 @@ export async function parseLocal3DFile(arrayBuffer, fileName) {
 }
 
 /**
+ * Mem-parse file `.nwdjson` baik dalam format Binary Cepat `NWDB` (bebas limit string 512MB)
+ * maupun format JSON teks legacy.
+ * @param {ArrayBuffer} arrayBuffer
+ * @param {string} fileName
+ */
+function parseNwdPackageBuffer(arrayBuffer, fileName) {
+  const u8 = new Uint8Array(arrayBuffer);
+
+  // 1. Cek Magic Header "NWDB" (0x4E, 0x57, 0x44, 0x42) — Format Binary Cepat
+  if (
+    u8.byteLength >= 16 &&
+    u8[0] === 0x4e &&
+    u8[1] === 0x57 &&
+    u8[2] === 0x44 &&
+    u8[3] === 0x42
+  ) {
+    const dv = new DataView(arrayBuffer);
+    const partCount = dv.getUint32(8, true);
+    const paddedMetaLen = dv.getUint32(12, true);
+    const metaStart = 16;
+    const metaEnd = metaStart + paddedMetaLen;
+
+    if (metaEnd > arrayBuffer.byteLength) {
+      throw new Error('Header file NWDB Binary rusak atau tidak lengkap.');
+    }
+
+    // Decode bagian metadata NDJSON per potongan aman
+    const decoder = new TextDecoder('utf-8');
+    const metaText = decoder.decode(u8.subarray(metaStart, metaEnd));
+    const lines = metaText.split('\n');
+
+    const items = [];
+    let binOffset = metaEnd;
+
+    for (let idx = 0; idx < lines.length; idx++) {
+      const line = lines[idx].trim();
+      if (!line) continue;
+
+      let meta;
+      try {
+        meta = JSON.parse(line);
+      } catch {
+        continue;
+      }
+
+      const vCount = Number(meta.v || 0);
+      const iCount = Number(meta.i || 0);
+      const posByteLen = vCount * 3 * 4;
+      const idxByteLen = iCount * 4;
+
+      if (vCount < 3 || binOffset + posByteLen + idxByteLen > arrayBuffer.byteLength) {
+        binOffset += posByteLen + idxByteLen;
+        continue;
+      }
+
+      const positions = new Float32Array(arrayBuffer.slice(binOffset, binOffset + posByteLen));
+      binOffset += posByteLen;
+
+      let indices = null;
+      if (iCount > 0) {
+        indices = new Uint32Array(arrayBuffer.slice(binOffset, binOffset + idxByteLen));
+        binOffset += idxByteLen;
+      }
+
+      const normals = computeVertexNormals(positions, indices);
+      const itemName = meta.n || `Component_${meta.id || items.length + 1}`;
+      const catName = meta.cat || 'Navisworks Element';
+
+      items.push({
+        name: itemName,
+        category: catName,
+        system: fileName,
+        materialName: 'Navisworks Material',
+        colorHex: Number(meta.c ?? 0x38bdf8),
+        positions,
+        normals,
+        indices,
+        specs: {
+          'Item Name': itemName,
+          Category: catName,
+          'Element dbId': String(meta.id ?? items.length + 1),
+          Vertices: String(vCount),
+          Triangles: String(iCount > 0 ? Math.floor(iCount / 3) : Math.floor(vCount / 3)),
+          'Container Format': `NWDB Binary Stream (${partCount} parts)`
+        }
+      });
+    }
+
+    if (items.length === 0) {
+      throw new Error('File NWDB Binary tidak berisi geometri 3D yang valid.');
+    }
+    return items;
+  }
+
+  // 2. Fallback: Format JSON Teks Legacy
+  const text = new TextDecoder().decode(u8);
+  const parsed = JSON.parse(text);
+  const rawMeshes = Array.isArray(parsed.meshes) ? parsed.meshes : [];
+  if (rawMeshes.length === 0) {
+    throw new Error('File JSON/NWDJSON tidak berisi daftar mesh 3D yang valid.');
+  }
+  return rawMeshes.map((m) => {
+    const positions = new Float32Array(m.positions || []);
+    const indices = m.indices ? new Uint32Array(m.indices) : null;
+    const normals = m.normals
+      ? new Float32Array(m.normals)
+      : computeVertexNormals(positions, indices);
+    return {
+      name: m.name || 'NWD Element',
+      category: m.category || 'Navisworks Component',
+      system: m.system || parsed.modelName || fileName,
+      materialName: m.materialName || 'Autodesk Material',
+      colorHex: Number(m.colorHex || 0x38bdf8),
+      positions,
+      normals,
+      indices,
+      specs: m.specs || {
+        'Item Name': m.name || 'NWD Element',
+        Source: 'Extracted from Autodesk Viewer'
+      }
+    };
+  });
+}
+
+/**
  * ============================================================================
  * 6. GENERATOR SCRIPT 1-KLIK EKSTRAKTOR .NWD DARI VIEWER.AUTODESK.COM
- *    (100% Gratis Tanpa Kartu Kredit)
+ *    (100% Gratis Tanpa Kartu Kredit — Binary Stream Anti Limit String 512MB)
  * ============================================================================
  * Menghasilkan script JavaScript mandiri yang dapat ditempel ke Console (F12)
- * pada https://viewer.autodesk.com saat model .NWD sedang terbuka, untuk
- * mengekstrak seluruh geometri 3D, matriks dunia, warna material, dan nama
- * komponen menjadi satu file `.nwdjson` yang bisa langsung dibuka 100% Offline!
+ * pada https://viewer.autodesk.com saat model .NWD sedang terbuka.
+ * Menggunakan format Binary Stream `NWDB` (`Float32Array` + `Uint32Array` di dalam
+ * `Blob` chunks) sehingga TIDAK PERNAH memanggil `JSON.stringify` pada array geometri
+ * besar dan bebas 100% dari error `RangeError: Invalid string length`!
  */
 export function getFreeAutodeskViewerExtractorScript() {
-  return `(function(){
+  return `(async function(){
   const v = window.NOP_VIEWER || (window.NOP_VIEWERS && window.NOP_VIEWERS[0]);
   if (!v || !v.model) {
     alert("Buka dan tunggu hingga model 3D .NWD selesai tampil di viewer.autodesk.com terlebih dahulu!");
@@ -868,14 +968,18 @@ export function getFreeAutodeskViewerExtractorScript() {
   }
   const model = v.model;
   const fragList = model.getFragmentList();
-  const tree = model.getInstanceTree ? model.getInstanceTree() : null;
+  const modelData = model.getData ? model.getData() : null;
+  const tree = (modelData && modelData.instanceTree) ? modelData.instanceTree : null;
   const count = fragList.getCount();
-  const meshes = [];
   const mat4 = new window.THREE.Matrix4();
   const vec3 = new window.THREE.Vector3();
+  const frag2dbId = (fragList.fragments && fragList.fragments.fragId2dbId) || null;
 
-  // Helper mengambil dbId untuk setiap fragId
-  const frag2dbId = fragList.fragments?.fragId2dbId || (fragList.getFragIdToDbIdMap ? fragList.getFragIdToDbIdMap() : null);
+  console.log("[NWD Binary Extractor] Memulai ekstraksi cepat untuk " + count + " komponen...");
+
+  const metaLines = [];
+  const binaryChunks = [];
+  let extractedCount = 0;
 
   for (let fragId = 0; fragId < count; fragId++) {
     const vizmesh = fragList.getVizmesh(fragId);
@@ -883,71 +987,147 @@ export function getFreeAutodeskViewerExtractorScript() {
     const geom = vizmesh.geometry;
     fragList.getWorldMatrix(fragId, mat4);
 
-    let dbId = frag2dbId ? frag2dbId[fragId] : (fragList.getDbIds ? fragList.getDbIds(fragId) : fragId);
+    let dbId = frag2dbId ? frag2dbId[fragId] : fragId;
     if (Array.isArray(dbId)) dbId = dbId[0];
-    if (typeof dbId !== 'number') dbId = fragId;
+    if (typeof dbId !== "number" || dbId <= 0) dbId = fragId + 1;
 
     let name = "Component_" + dbId;
-    if (tree && typeof tree.getNodeName === 'function') {
+    let category = "Navisworks Element";
+    if (tree && typeof tree.getNodeName === "function") {
       try {
         name = tree.getNodeName(dbId) || name;
+        if (typeof tree.getNodeParentId === "function") {
+          const parentId = tree.getNodeParentId(dbId);
+          if (parentId && parentId > 0) {
+            category = tree.getNodeName(parentId) || category;
+          }
+        }
       } catch(e){}
     }
 
-    let posOut = [];
+    let srcVb = null;
+    let stride = 3;
+    let offset = 0;
+    let vCount = 0;
+
     if (geom.vb && geom.vbstride) {
-      const vb = geom.vb;
-      const stride = geom.vbstride;
-      const offset = (geom.attributes && geom.attributes.position && geom.attributes.position.itemOffset) || 0;
-      const vCount = Math.floor(vb.length / stride);
+      srcVb = geom.vb;
+      stride = geom.vbstride;
+      offset = (geom.attributes && geom.attributes.position && geom.attributes.position.itemOffset) || 0;
+      vCount = Math.floor(srcVb.length / stride);
+    } else if (geom.attributes && geom.attributes.position && geom.attributes.position.array) {
+      srcVb = geom.attributes.position.array;
+      stride = geom.attributes.position.itemSize || 3;
+      offset = 0;
+      vCount = Math.floor(srcVb.length / stride);
+    }
+    if (!srcVb || vCount < 3) continue;
+
+    const rawIb = geom.ib || (geom.attributes && geom.attributes.index && geom.attributes.index.array) || null;
+    let posArr = null;
+    let idxArr = null;
+
+    if (rawIb && rawIb.length >= 3 && vCount > rawIb.length * 2) {
+      const iLen = rawIb.length - (rawIb.length % 3);
+      idxArr = new Uint32Array(iLen);
+      const remap = new Map();
+      const tempCoords = [];
+      let nextV = 0;
+      for (let k = 0; k < iLen; k++) {
+        const origV = rawIb[k];
+        let mapped = remap.get(origV);
+        if (mapped === undefined) {
+          const b = origV * stride + offset;
+          vec3.set(srcVb[b] || 0, srcVb[b + 1] || 0, srcVb[b + 2] || 0).applyMatrix4(mat4);
+          tempCoords.push(vec3.x, vec3.y, vec3.z);
+          mapped = nextV++;
+          remap.set(origV, mapped);
+        }
+        idxArr[k] = mapped;
+      }
+      if (nextV < 3) continue;
+      posArr = new Float32Array(tempCoords);
+    } else {
+      posArr = new Float32Array(vCount * 3);
       for (let i = 0; i < vCount; i++) {
         const b = i * stride + offset;
-        vec3.set(vb[b], vb[b+1], vb[b+2]).applyMatrix4(mat4);
-        posOut.push(Number(vec3.x.toFixed(4)), Number(vec3.y.toFixed(4)), Number(vec3.z.toFixed(4)));
+        vec3.set(srcVb[b] || 0, srcVb[b + 1] || 0, srcVb[b + 2] || 0).applyMatrix4(mat4);
+        const out = i * 3;
+        posArr[out] = vec3.x;
+        posArr[out + 1] = vec3.y;
+        posArr[out + 2] = vec3.z;
       }
-    } else if (geom.attributes && geom.attributes.position && geom.attributes.position.array) {
-      const arr = geom.attributes.position.array;
-      for (let i = 0; i < arr.length; i += 3) {
-        vec3.set(arr[i], arr[i+1], arr[i+2]).applyMatrix4(mat4);
-        posOut.push(Number(vec3.x.toFixed(4)), Number(vec3.y.toFixed(4)), Number(vec3.z.toFixed(4)));
+      if (rawIb && rawIb.length >= 3) {
+        const iLen = rawIb.length - (rawIb.length % 3);
+        idxArr = new Uint32Array(iLen);
+        for (let k = 0; k < iLen; k++) idxArr[k] = rawIb[k];
       }
     }
-    if (posOut.length < 9) continue;
-
-    const rawIb = geom.ib || (geom.attributes && geom.attributes.index && geom.attributes.index.array);
-    const indices = rawIb ? Array.from(rawIb) : null;
 
     let colorHex = 0x38bdf8;
     const mat = fragList.getMaterial(fragId);
-    if (mat && mat.color && typeof mat.color.getHex === 'function') {
+    if (mat && mat.color && typeof mat.color.getHex === "function") {
       colorHex = mat.color.getHex();
     }
 
-    meshes.push({
-      dbId: dbId,
-      name: name,
-      category: "Navisworks Element",
-      colorHex: colorHex,
-      positions: posOut,
-      indices: indices,
-      specs: { "Item Name": name, "Element dbId": String(dbId) }
-    });
+    const finalVCount = Math.floor(posArr.length / 3);
+    const finalICount = idxArr ? idxArr.length : 0;
+
+    metaLines.push(JSON.stringify({
+      id: dbId,
+      n: name,
+      cat: category,
+      c: colorHex,
+      v: finalVCount,
+      i: finalICount
+    }) + "\\n");
+
+    binaryChunks.push(posArr.buffer);
+    if (idxArr && finalICount > 0) {
+      binaryChunks.push(idxArr.buffer);
+    }
+    extractedCount++;
   }
 
-  const payload = JSON.stringify({
-    format: "nwd-offline-scene",
-    exportedAt: new Date().toISOString(),
-    modelName: "Extracted_Model.nwd",
-    meshes: meshes
-  });
+  if (extractedCount === 0) {
+    alert("Tidak ditemukan geometri 3D yang dapat diekstrak.");
+    return;
+  }
 
-  const blob = new Blob([payload], { type: "application/json" });
+  const metaBlob = new Blob(metaLines, { type: "text/plain;charset=utf-8" });
+  const metaBuf = await metaBlob.arrayBuffer();
+  const metaByteLen = metaBuf.byteLength;
+  const padBytes = (4 - (metaByteLen % 4)) % 4;
+  const paddedMetaLen = metaByteLen + padBytes;
+
+  const headerBuf = new ArrayBuffer(16);
+  const headerU8 = new Uint8Array(headerBuf);
+  headerU8[0] = 0x4E;
+  headerU8[1] = 0x57;
+  headerU8[2] = 0x44;
+  headerU8[3] = 0x42;
+  const headerDv = new DataView(headerBuf);
+  headerDv.setUint32(4, 1, true);
+  headerDv.setUint32(8, extractedCount, true);
+  headerDv.setUint32(12, paddedMetaLen, true);
+
+  const blobParts = [headerBuf, metaBuf];
+  if (padBytes > 0) {
+    blobParts.push(new Uint8Array(padBytes).fill(0x20).buffer);
+  }
+  for (let b = 0; b < binaryChunks.length; b++) {
+    blobParts.push(binaryChunks[b]);
+  }
+
+  const finalBlob = new Blob(blobParts, { type: "application/octet-stream" });
   const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
+  a.href = URL.createObjectURL(finalBlob);
   a.download = "Model_Offline_Package.nwdjson";
   document.body.appendChild(a);
   a.click();
   a.remove();
-  alert("Berhasil mengekstrak " + meshes.length + " komponen 3D! Silakan Drag & Drop file Model_Offline_Package.nwdjson ke aplikasi NWD Offline Viewer Anda.");
+  console.log("[NWD Binary Extractor] Selesai! " + extractedCount + " komponen berhasil diekstrak.");
+  alert("Berhasil mengekstrak " + extractedCount + " komponen 3D! Silakan Drag & Drop file Model_Offline_Package.nwdjson ke aplikasi NWD Offline Viewer Anda.");
 })();`;
 }
+

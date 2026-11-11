@@ -440,7 +440,7 @@ async function handleOpenOfflineModel(modelId) {
     );
 
     appState.activeModel = target;
-    dom.floatingQuickBar?.classList.remove('hidden');
+    dom.floatingQuickBar?.classList.add('hidden');
     dom.statusActiveModel.innerHTML = `Model: <strong>${escapeHtml(target.name)}</strong>`;
     dom.statusRenderMode.innerHTML = `Mode: <strong>${
       target.isDemo ? 'OFFLINE DEMO BIM' : '100% OFFLINE (IndexedDB / SW)'
@@ -614,10 +614,7 @@ function renderSelectionTreeUI(treeDataInput = null) {
 function handleViewerSelectionChanged(selectionInfo) {
   if (!selectionInfo || !selectionInfo.dbIds || selectionInfo.dbIds.length === 0) {
     dom.statusSelectedElement.innerHTML = `Seleksi: <strong>Tidak ada</strong>`;
-    if (dom.quickBarSelectedLabel) {
-      dom.quickBarSelectedLabel.textContent =
-        'Klik 1x Part: Pilih & Set Pivot • Klik 2x / F: Zoom Part';
-    }
+    dom.floatingQuickBar?.classList.add('hidden');
     const emptyHtml = `
       <div class="section-desc">
         Klik 1x elemen di 3D Viewport atau di Selection Tree untuk menginspeksi metadata BIM &amp; mengatur pusat putaran (Orbit Pivot).
@@ -637,6 +634,7 @@ function handleViewerSelectionChanged(selectionInfo) {
 
   const primaryDbId = Number(selectionInfo.dbIds[0]);
   dom.statusSelectedElement.innerHTML = `Seleksi: <strong>${escapeHtml(selectionInfo.name)}</strong>`;
+  dom.floatingQuickBar?.classList.remove('hidden');
   if (dom.quickBarSelectedLabel) {
     dom.quickBarSelectedLabel.textContent = `Terpilih: ${selectionInfo.name} (Pivot Aktif)`;
   }
@@ -1289,7 +1287,7 @@ function bindEventListeners() {
         renderSelectionTreeUI
       );
       if (dom.floatingQuickBar) {
-        dom.floatingQuickBar.classList.remove('hidden');
+        dom.floatingQuickBar.classList.add('hidden');
       }
       dom.statusActiveModel.innerHTML = `Model: <strong>Cloud URN (${escapeHtml(rawUrn.slice(0, 14))}...)</strong>`;
       dom.statusRenderMode.innerHTML = `Mode: <strong>CLOUD STREAMING (APS)</strong>`;
@@ -1418,7 +1416,12 @@ function bindEventListeners() {
   dom.btnHide.addEventListener('click', hideSelected);
   dom.btnShowAll.addEventListener('click', showAllObjects);
 
-  // Floating Quick Action Bar (Bottom Center)
+  // Floating Quick Action Bar (Bottom Center — muncul saat part dipilih)
+  if (dom.btnCloseQuickBar) {
+    dom.btnCloseQuickBar.addEventListener('click', () => {
+      dom.floatingQuickBar?.classList.add('hidden');
+    });
+  }
   if (dom.btnQuickFitAll) {
     dom.btnQuickFitAll.addEventListener('click', () => fitToViewAll(true));
   }
@@ -1426,13 +1429,19 @@ function bindEventListeners() {
     dom.btnQuickFocusPart.addEventListener('click', () => focusOnDbIds());
   }
   if (dom.btnQuickHidePart) {
-    dom.btnQuickHidePart.addEventListener('click', hideSelected);
+    dom.btnQuickHidePart.addEventListener('click', () => {
+      hideSelected();
+      dom.floatingQuickBar?.classList.add('hidden');
+    });
   }
   if (dom.btnQuickIsolatePart) {
     dom.btnQuickIsolatePart.addEventListener('click', isolateSelected);
   }
   if (dom.btnQuickShowAll) {
-    dom.btnQuickShowAll.addEventListener('click', showAllObjects);
+    dom.btnQuickShowAll.addEventListener('click', () => {
+      showAllObjects();
+      dom.floatingQuickBar?.classList.add('hidden');
+    });
   }
 
   // Global CAD Keyboard Shortcuts (Home, F, H, I, U, Esc)
@@ -1453,11 +1462,13 @@ function bindEventListeners() {
     } else if (key === 'h') {
       e.preventDefault();
       hideSelected();
+      dom.floatingQuickBar?.classList.add('hidden');
     } else if (key === 'i') {
       e.preventDefault();
       isolateSelected();
     } else if (key === 'u' || e.key === 'Escape') {
       showAllObjects();
+      dom.floatingQuickBar?.classList.add('hidden');
     }
   });
 

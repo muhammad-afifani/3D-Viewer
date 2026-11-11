@@ -502,10 +502,15 @@
             <span class="pivot-ring"></span>
           </div>
 
-          <!-- Floating Quick Action Bar (Bottom-Center Autodesk Viewer Style) -->
+          <!-- Floating Quick Action Bar (Hanya muncul saat ada Part yang dipilih, berada di atas toolbar bawah) -->
           <div id="floatingQuickBar" class="floating-quick-bar hidden">
-            <div id="quickBarSelectedLabel" class="quick-bar-selected-label" title="Part yang sedang dipilih (Pivot Orbit aktif)">
-              Klik 1x Part: Pilih &amp; Set Pivot • Klik 2x: Zoom Part
+            <div class="quick-bar-header">
+              <div id="quickBarSelectedLabel" class="quick-bar-selected-label" title="Part yang sedang dipilih (Pivot Orbit aktif)">
+                Part Terpilih
+              </div>
+              <button id="btnCloseQuickBar" class="quick-bar-close-btn" title="Sembunyikan panel cepat ini (Esc)">
+                &times;
+              </button>
             </div>
             <div class="quick-bar-buttons">
               <button id="btnQuickFitAll" class="quick-action-btn" title="Fit All (Shortcut: Home) — Tampilkan seluruh model 3D secara utuh">

@@ -1497,40 +1497,71 @@ textarea {
   box-shadow: 0 0 10px hsla(199, 89%, 48%, 0.45);
 }
 
-/* Floating Quick Action Bar (Bottom-Center Autodesk Viewer Style) */
+/* Floating Quick Action Bar (Muncul saat Part dipilih, berada di atas toolbar bawah Autodesk Viewer) */
 .floating-quick-bar {
   position: absolute;
-  bottom: 58px;
+  bottom: 84px;
   left: 50%;
   transform: translateX(-50%);
   z-index: 16;
-  background: hsla(222, 34%, 9%, 0.92);
+  background: hsla(222, 34%, 9%, 0.94);
   backdrop-filter: blur(10px);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-lg);
-  padding: 6px 10px;
-  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.68);
+  padding: 6px 10px 8px;
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.72);
   display: flex;
   flex-direction: column;
-  align-items: center;
-  gap: 5px;
+  align-items: stretch;
+  gap: 6px;
   pointer-events: auto;
   max-width: 94%;
 }
 
 .floating-quick-bar.hidden {
-  display: none;
+  display: none !important;
+}
+
+.quick-bar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 0 4px;
 }
 
 .quick-bar-selected-label {
   font-size: 11px;
   font-family: var(--font-mono);
   color: var(--accent-primary);
-  max-width: 480px;
+  max-width: 440px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  padding: 0 6px;
+}
+
+.quick-bar-close-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-surface-2);
+  color: var(--text-muted);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+  flex-shrink: 0;
+  transition: all 120ms ease;
+}
+
+.quick-bar-close-btn:hover {
+  background: var(--status-danger-soft);
+  border-color: var(--status-danger);
+  color: var(--status-danger);
 }
 
 .quick-bar-buttons {
