@@ -754,6 +754,8 @@ function pickPartAtScreenCoords(clientX, clientY, container) {
     const vB = new THREE.Vector3();
     const vC = new THREE.Vector3();
     const intersectPt = new THREE.Vector3();
+    const localRay = new THREE.Ray();
+    const invMat = new THREE.Matrix4();
 
     for (const { part, boxDist } of candidates) {
       if (boxDist > closestDist) break; // Early exit jika kotak sudah lebih jauh dari hit segitiga terdekat
@@ -763,33 +765,64 @@ function pickPartAtScreenCoords(clientX, clientY, container) {
           const geom = mesh.geometry;
           const posAttr = geom?.attributes?.position;
           if (!posAttr || !posAttr.array) {
-            // Fallback ke pusat bbox jika buffer sudah dikonsolidasi
             const centerDist = rayOrigin.distanceTo(part.center);
             if (centerDist < closestDist) {
               closestDist = centerDist;
-              bestHit = { dbId: part.dbId, point: boxDist > 0 ? rayOrigin.clone().addScaledVector(rayDir, boxDist) : part.center.clone() };
+              bestHit = {
+                dbId: part.dbId,
+                point:
+                  boxDist > 0
+                    ? rayOrigin.clone().addScaledVector(rayDir, boxDist)
+                    : part.center.clone()
+              };
             }
             continue;
           }
 
+          const isLocalSpace = Boolean(mesh.matrixWorld && !mesh.PositionIsWorld);
+          if (isLocalSpace) {
+            invMat.getInverse(mesh.matrixWorld);
+            localRay.copy(raycaster.ray).applyMatrix4(invMat);
+          } else {
+            localRay.copy(raycaster.ray);
+          }
+
           const arr = posAttr.array;
-          for (let i = 0; i <= arr.length - 9; i += 9) {
-            vA.set(arr[i], arr[i + 1], arr[i + 2]);
-            vB.set(arr[i + 3], arr[i + 4], arr[i + 5]);
-            vC.set(arr[i + 6], arr[i + 7], arr[i + 8]);
+          const ib = geom.index?.array || geom.ib || null;
 
-            if (mesh.matrixWorld && !mesh.PositionIsWorld) {
-              vA.applyMatrix4(mesh.matrixWorld);
-              vB.applyMatrix4(mesh.matrixWorld);
-              vC.applyMatrix4(mesh.matrixWorld);
+          if (ib && ib.length >= 3) {
+            for (let t = 0; t <= ib.length - 3; t += 3) {
+              const i0 = ib[t] * 3;
+              const i1 = ib[t + 1] * 3;
+              const i2 = ib[t + 2] * 3;
+              vA.set(arr[i0], arr[i0 + 1], arr[i0 + 2]);
+              vB.set(arr[i1], arr[i1 + 1], arr[i1 + 2]);
+              vC.set(arr[i2], arr[i2 + 1], arr[i2 + 2]);
+
+              const hitPt = localRay.intersectTriangle(vA, vB, vC, false, intersectPt);
+              if (hitPt) {
+                if (isLocalSpace) hitPt.applyMatrix4(mesh.matrixWorld);
+                const d = rayOrigin.distanceTo(hitPt);
+                if (d < closestDist) {
+                  closestDist = d;
+                  bestHit = { dbId: part.dbId, point: hitPt.clone() };
+                }
+              }
             }
+          } else {
+            for (let i = 0; i <= arr.length - 9; i += 9) {
+              vA.set(arr[i], arr[i + 1], arr[i + 2]);
+              vB.set(arr[i + 3], arr[i + 4], arr[i + 5]);
+              vC.set(arr[i + 6], arr[i + 7], arr[i + 8]);
 
-            const hitPt = raycaster.ray.intersectTriangle(vA, vB, vC, false, intersectPt);
-            if (hitPt) {
-              const d = rayOrigin.distanceTo(hitPt);
-              if (d < closestDist) {
-                closestDist = d;
-                bestHit = { dbId: part.dbId, point: hitPt.clone() };
+              const hitPt = localRay.intersectTriangle(vA, vB, vC, false, intersectPt);
+              if (hitPt) {
+                if (isLocalSpace) hitPt.applyMatrix4(mesh.matrixWorld);
+                const d = rayOrigin.distanceTo(hitPt);
+                if (d < closestDist) {
+                  closestDist = d;
+                  bestHit = { dbId: part.dbId, point: hitPt.clone() };
+                }
               }
             }
           }
@@ -887,21 +920,26 @@ function applyVisualSelectionHighlight(dbIds) {
   }
 }
 
+let sharedHighlightMaterial = null;
+
 function applyPartHighlightMaterial(part) {
   if (!part || !viewerInstance) return;
   const THREE = window.THREE;
 
   if (!part.highlightMaterial) {
-    part.highlightMaterial = new THREE.MeshPhongMaterial({
-      color: new THREE.Color(0x00d8ff),
-      emissive: new THREE.Color(0x004e66),
-      specular: new THREE.Color(0xffffff),
-      shininess: 75,
-      side: THREE.DoubleSide
-    });
-    if (part.modelBuilder) {
-      part.modelBuilder.addMaterial(`mat_hl_${part.dbId}`, part.highlightMaterial);
+    if (!sharedHighlightMaterial) {
+      sharedHighlightMaterial = new THREE.MeshPhongMaterial({
+        color: new THREE.Color(0x00d8ff),
+        emissive: new THREE.Color(0x004e66),
+        specular: new THREE.Color(0xffffff),
+        shininess: 75,
+        side: THREE.DoubleSide
+      });
     }
+    if (part.modelBuilder && !sharedHighlightMaterial.materialManagerName) {
+      part.modelBuilder.addMaterial('mat_global_highlight_cyan', sharedHighlightMaterial);
+    }
+    part.highlightMaterial = sharedHighlightMaterial;
   }
 
   const fragList = viewerInstance.model?.getFragmentList?.();
@@ -923,21 +961,29 @@ function applyPartHighlightMaterial(part) {
 
 function restorePartOriginalMaterial(part) {
   if (!part || !viewerInstance) return;
-  if (!part.originalMaterial) return;
+  if (!part.originalMaterial && (!part.originalMaterials || part.originalMaterials.length === 0)) {
+    return;
+  }
 
   const fragList = viewerInstance.model?.getFragmentList?.();
   if (fragList && part.fragIds) {
-    for (const fragId of part.fragIds) {
+    for (let idx = 0; idx < part.fragIds.length; idx++) {
+      const fragId = part.fragIds[idx];
+      const origMat = part.originalMaterials?.[idx] || part.originalMaterial;
+      if (!origMat) continue;
       try {
-        fragList.setMaterial(fragId, part.originalMaterial);
+        fragList.setMaterial(fragId, origMat);
       } catch {
         // Abaikan
       }
     }
   }
   if (part.meshes) {
-    for (const m of part.meshes) {
-      m.material = part.originalMaterial;
+    for (let idx = 0; idx < part.meshes.length; idx++) {
+      const origMat = part.originalMaterials?.[idx] || part.originalMaterial;
+      if (origMat) {
+        part.meshes[idx].material = origMat;
+      }
     }
   }
 }
@@ -1303,6 +1349,14 @@ async function buildCustomParsedMeshScene(viewer, modelName, meshItems) {
   partRegistry.clear();
   fragIdToDbIdMap.clear();
   selectedDbIdSet.clear();
+  sharedHighlightMaterial = null;
+
+  // ==========================================================================
+  // JALUR CEPAT & HEMAT MEMORI: NWDB v2 INSTANCED SCENE (Shared BufferGeometry)
+  // ==========================================================================
+  if (meshItems && meshItems.isInstancedScene === true) {
+    return buildInstancedSceneFromNwdbV2(viewer, modelName, meshItems);
+  }
 
   // TAHAP 1: Validasi setiap mesh & hitung bounding box mentah masing-masing part
   const validItems = [];
@@ -1313,21 +1367,34 @@ async function buildCustomParsedMeshScene(viewer, modelName, meshItems) {
 
     let posFloats = item.positions;
     let normFloats = item.normals;
+    let indexU16 = null;
+    const vertCount = Math.floor(posFloats.length / 3);
 
     if (item.indices && item.indices.length >= 3) {
-      const idxArr = item.indices;
-      const expandedPos = new Float32Array(idxArr.length * 3);
-      for (let k = 0; k < idxArr.length; k++) {
-        const vi = idxArr[k] * 3;
-        expandedPos[k * 3] = posFloats[vi] || 0;
-        expandedPos[k * 3 + 1] = posFloats[vi + 1] || 0;
-        expandedPos[k * 3 + 2] = posFloats[vi + 2] || 0;
+      if (vertCount <= 65535) {
+        // Pertahankan Indexed BufferGeometry (Uint16Array) — hemat RAM hingga 6x lipat!
+        indexU16 =
+          item.indices instanceof Uint16Array
+            ? item.indices
+            : new Uint16Array(item.indices);
+      } else {
+        // Hanya expand jika 1 mesh tunggal memiliki > 65.535 vertex
+        const idxArr = item.indices;
+        const expandedPos = new Float32Array(idxArr.length * 3);
+        for (let k = 0; k < idxArr.length; k++) {
+          const vi = idxArr[k] * 3;
+          expandedPos[k * 3] = posFloats[vi] || 0;
+          expandedPos[k * 3 + 1] = posFloats[vi + 1] || 0;
+          expandedPos[k * 3 + 2] = posFloats[vi + 2] || 0;
+        }
+        posFloats = expandedPos;
+        normFloats = null;
       }
-      posFloats = expandedPos;
-      normFloats = null;
     }
 
-    const validFloatLen = Math.floor(posFloats.length / 9) * 9;
+    const validFloatLen = indexU16
+      ? Math.floor(posFloats.length / 3) * 3
+      : Math.floor(posFloats.length / 9) * 9;
     if (validFloatLen < 9) continue;
 
     let pMinX = Infinity;
@@ -1361,7 +1428,6 @@ async function buildCustomParsedMeshScene(viewer, modelName, meshItems) {
     const spanX = pMaxX - pMinX;
     const spanY = pMaxY - pMinY;
     const spanZ = pMaxZ - pMinZ;
-    // Abaikan geometri degenerate yang ukurannya 0 di semua sumbu
     if (spanX < 1e-6 && spanY < 1e-6 && spanZ < 1e-6) continue;
 
     validItems.push({
@@ -1372,6 +1438,7 @@ async function buildCustomParsedMeshScene(viewer, modelName, meshItems) {
         normFloats && normFloats.length >= validFloatLen
           ? normFloats.subarray(0, validFloatLen)
           : null,
+      indexU16,
       rawMin: new THREE.Vector3(pMinX, pMinY, pMinZ),
       rawMax: new THREE.Vector3(pMaxX, pMaxY, pMaxZ),
       rawCenter: new THREE.Vector3(
@@ -1393,7 +1460,6 @@ async function buildCustomParsedMeshScene(viewer, modelName, meshItems) {
   const midIdx = Math.floor(validItems.length / 2);
   const medianCenter = new THREE.Vector3(xs[midIdx], ys[midIdx], zs[midIdx]);
 
-  // Hitung jarak setiap part dari medianCenter untuk mendeteksi outlier ekstrem
   const dists = validItems
     .map((v) => v.rawCenter.distanceTo(medianCenter))
     .sort((a, b) => a - b);
@@ -1448,45 +1514,49 @@ async function buildCustomParsedMeshScene(viewer, modelName, meshItems) {
     bbox: globalNormalizedBox.clone()
   });
 
+  // Material Pooling berdasarkan warna (colorHex) untuk menghemat memori GPU/CPU
+  const materialPool = new Map();
+  function getPooledMaterial(colorHex) {
+    const key = Number(colorHex || 0x38bdf8);
+    let mat = materialPool.get(key);
+    if (!mat) {
+      mat = new THREE.MeshPhongMaterial({
+        color: new THREE.Color(key),
+        specular: new THREE.Color(0x334155),
+        shininess: 38,
+        side: THREE.DoubleSide
+      });
+      modelBuilder.addMaterial(`mat_color_${key.toString(16)}`, mat);
+      materialPool.set(key, mat);
+    }
+    return mat;
+  }
+
   const MAX_FLOATS_PER_CHUNK = 162000; // <= 54.000 vertex per chunk (aman untuk Uint16Array)
 
   for (let i = 0; i < validItems.length; i++) {
-    const { item, posFloats, normFloats, rawMin, rawMax } = validItems[i];
-    const dbId = i + 1;
+    const { item, posFloats, normFloats, indexU16, rawMin, rawMax } = validItems[i];
+    const dbId = Number(item.dbId || i + 1);
 
     const finalNormals =
       normFloats && normFloats.length === posFloats.length
         ? normFloats
-        : computeVertexNormals(posFloats, null);
+        : computeVertexNormals(posFloats, indexU16);
 
     const colorHex = item.colorHex || 0x38bdf8;
-    const matKey = `mat_part_${dbId}`;
-    const mat = new THREE.MeshPhongMaterial({
-      color: new THREE.Color(colorHex),
-      specular: new THREE.Color(0x334155),
-      shininess: 38,
-      side: THREE.DoubleSide
-    });
-    modelBuilder.addMaterial(matKey, mat);
+    const mat = getPooledMaterial(colorHex);
 
     const partBBox = new THREE.Box3(rawMin.clone(), rawMax.clone());
     const partMeshes = [];
     const partFragIds = [];
+    const partOrigMats = [];
 
-    for (let offset = 0; offset < posFloats.length; offset += MAX_FLOATS_PER_CHUNK) {
-      const end = Math.min(offset + MAX_FLOATS_PER_CHUNK, posFloats.length);
-      const chunkPos =
-        offset === 0 && end === posFloats.length
-          ? posFloats
-          : posFloats.slice(offset, end);
-      const chunkNorm =
-        offset === 0 && end === finalNormals.length
-          ? finalNormals
-          : finalNormals.slice(offset, end);
-
+    if (indexU16) {
       const bufGeom = new THREE.BufferGeometry();
-      const posAttr = new THREE.BufferAttribute(chunkPos, 3);
-      const normAttr = new THREE.BufferAttribute(chunkNorm, 3);
+      const posAttr = new THREE.BufferAttribute(posFloats, 3);
+      const normAttr = new THREE.BufferAttribute(finalNormals, 3);
+      const idxAttr = new THREE.BufferAttribute(indexU16, 1);
+      idxAttr.bytesPerItem = 2;
 
       if (typeof bufGeom.addAttribute === 'function') {
         bufGeom.addAttribute('position', posAttr);
@@ -1495,12 +1565,17 @@ async function buildCustomParsedMeshScene(viewer, modelName, meshItems) {
         bufGeom.setAttribute('position', posAttr);
         bufGeom.setAttribute('normal', normAttr);
       }
+      if (typeof bufGeom.setIndex === 'function') {
+        bufGeom.setIndex(idxAttr);
+      } else {
+        bufGeom.index = idxAttr;
+      }
 
       bufGeom.computeBoundingBox();
       bufGeom.computeBoundingSphere();
 
       const mesh = new THREE.Mesh(bufGeom, mat);
-      mesh.dbId = dbId; // PENTING: Set dbId sebelum addMesh agar SceneBuilder memetakan dbId dengan benar!
+      mesh.dbId = dbId;
       mesh.PositionIsWorld = true;
       mesh.matrixAutoUpdate = false;
       mesh.updateMatrix();
@@ -1509,41 +1584,339 @@ async function buildCustomParsedMeshScene(viewer, modelName, meshItems) {
       modelBuilder.addMesh(mesh);
 
       partMeshes.push(mesh);
+      partOrigMats.push(mat);
       if (mesh.fragId !== undefined) {
         partFragIds.push(mesh.fragId);
         fragIdToDbIdMap.set(mesh.fragId, dbId);
       }
+    } else {
+      for (let offset = 0; offset < posFloats.length; offset += MAX_FLOATS_PER_CHUNK) {
+        const end = Math.min(offset + MAX_FLOATS_PER_CHUNK, posFloats.length);
+        const chunkPos =
+          offset === 0 && end === posFloats.length
+            ? posFloats
+            : posFloats.slice(offset, end);
+        const chunkNorm =
+          offset === 0 && end === finalNormals.length
+            ? finalNormals
+            : finalNormals.slice(offset, end);
+
+        const bufGeom = new THREE.BufferGeometry();
+        const posAttr = new THREE.BufferAttribute(chunkPos, 3);
+        const normAttr = new THREE.BufferAttribute(chunkNorm, 3);
+
+        if (typeof bufGeom.addAttribute === 'function') {
+          bufGeom.addAttribute('position', posAttr);
+          bufGeom.addAttribute('normal', normAttr);
+        } else if (typeof bufGeom.setAttribute === 'function') {
+          bufGeom.setAttribute('position', posAttr);
+          bufGeom.setAttribute('normal', normAttr);
+        }
+
+        bufGeom.computeBoundingBox();
+        bufGeom.computeBoundingSphere();
+
+        const mesh = new THREE.Mesh(bufGeom, mat);
+        mesh.dbId = dbId;
+        mesh.PositionIsWorld = true;
+        mesh.matrixAutoUpdate = false;
+        mesh.updateMatrix();
+        mesh.updateMatrixWorld(true);
+
+        modelBuilder.addMesh(mesh);
+
+        partMeshes.push(mesh);
+        partOrigMats.push(mat);
+        if (mesh.fragId !== undefined) {
+          partFragIds.push(mesh.fragId);
+          fragIdToDbIdMap.set(mesh.fragId, dbId);
+        }
+      }
     }
 
-    partRegistry.set(dbId, {
-      dbId,
-      name: item.name || `Component #${dbId}`,
-      category: item.category || '3D Elements',
-      system: item.system || modelName,
-      material: item.materialName || 'CAD Material',
-      colorHex,
-      specs: item.specs || {
-        'Element Name': item.name || `Component #${dbId}`,
-        Category: item.category || '3D Elements',
-        Triangles: String(Math.floor(posFloats.length / 9))
-      },
-      bbox: partBBox,
-      center: partBBox.getCenter(new THREE.Vector3()),
-      size: partBBox.getSize(new THREE.Vector3()),
-      visible: true,
-      selected: false,
-      fragIds: partFragIds,
-      meshes: partMeshes,
-      originalMaterial: mat,
-      highlightMaterial: null,
-      modelBuilder
+    const existingPart = partRegistry.get(dbId);
+    if (existingPart) {
+      existingPart.bbox.union(partBBox);
+      existingPart.center = existingPart.bbox.getCenter(new THREE.Vector3());
+      existingPart.size = existingPart.bbox.getSize(new THREE.Vector3());
+      existingPart.fragIds.push(...partFragIds);
+      existingPart.meshes.push(...partMeshes);
+      existingPart.originalMaterials.push(...partOrigMats);
+    } else {
+      partRegistry.set(dbId, {
+        dbId,
+        name: item.name || `Component #${dbId}`,
+        category: item.category || '3D Elements',
+        system: item.system || modelName,
+        material: item.materialName || 'CAD Material',
+        colorHex,
+        specs: item.specs || {
+          'Element Name': item.name || `Component #${dbId}`,
+          Category: item.category || '3D Elements',
+          Triangles: String(
+            indexU16 ? Math.floor(indexU16.length / 3) : Math.floor(posFloats.length / 9)
+          )
+        },
+        bbox: partBBox,
+        center: partBBox.getCenter(new THREE.Vector3()),
+        size: partBBox.getSize(new THREE.Vector3()),
+        visible: true,
+        selected: false,
+        fragIds: partFragIds,
+        meshes: partMeshes,
+        originalMaterial: mat,
+        originalMaterials: partOrigMats,
+        highlightMaterial: null,
+        modelBuilder
+      });
+    }
+  }
+
+  patchSceneBuilderInstanceTree(modelBuilder, modelName);
+  fitToViewAll({ resetIso: true, immediate: true });
+  notifyHierarchyChanged();
+
+  return modelBuilder.model;
+}
+
+/**
+ * Membangun Scene 3D dari paket `NWDB v2` (Instanced Geometry Table + Instance Matrix Table).
+ * Menggunakan Shared `THREE.BufferGeometry` & Pooled `THREE.MeshPhongMaterial` sehingga
+ * model .NWD raksasa (100.000+ komponen) dapat dibuka dalam hitungan detik tanpa "Aw, Snap!" (OOM).
+ */
+async function buildInstancedSceneFromNwdbV2(viewer, modelName, instancedData) {
+  const THREE = window.THREE;
+  const { sharedGeometries, instances } = instancedData;
+
+  // TAHAP 1: Siapkan THREE.BufferGeometry untuk setiap geometri unik HANYA 1 KALI
+  const builtGeoms = new Array(sharedGeometries.length).fill(null);
+  const localBoxes = new Array(sharedGeometries.length).fill(null);
+
+  for (let g = 0; g < sharedGeometries.length; g++) {
+    const sg = sharedGeometries[g];
+    if (!sg || !sg.positions || sg.positions.length < 9) continue;
+
+    let posFloats = sg.positions;
+    let idxU16 = null;
+    const vCount = Math.floor(posFloats.length / 3);
+
+    if (sg.indices && sg.indices.length >= 3) {
+      if (vCount <= 65535) {
+        idxU16 =
+          sg.indices instanceof Uint16Array ? sg.indices : new Uint16Array(sg.indices);
+      } else {
+        // Jika geometri tunggal > 65.535 vertex, un-index dan potong <= 54.000 vertex
+        const maxTriIndices = Math.min(sg.indices.length, 54000 * 3);
+        const expandedPos = new Float32Array(maxTriIndices * 3);
+        for (let k = 0; k < maxTriIndices; k++) {
+          const vi = sg.indices[k] * 3;
+          expandedPos[k * 3] = posFloats[vi] || 0;
+          expandedPos[k * 3 + 1] = posFloats[vi + 1] || 0;
+          expandedPos[k * 3 + 2] = posFloats[vi + 2] || 0;
+        }
+        posFloats = expandedPos;
+      }
+    }
+
+    const normals = computeVertexNormals(posFloats, idxU16);
+    const bufGeom = new THREE.BufferGeometry();
+    const posAttr = new THREE.BufferAttribute(posFloats, 3);
+    const normAttr = new THREE.BufferAttribute(normals, 3);
+
+    if (typeof bufGeom.addAttribute === 'function') {
+      bufGeom.addAttribute('position', posAttr);
+      bufGeom.addAttribute('normal', normAttr);
+    } else if (typeof bufGeom.setAttribute === 'function') {
+      bufGeom.setAttribute('position', posAttr);
+      bufGeom.setAttribute('normal', normAttr);
+    }
+
+    if (idxU16) {
+      const idxAttr = new THREE.BufferAttribute(idxU16, 1);
+      idxAttr.bytesPerItem = 2;
+      if (typeof bufGeom.setIndex === 'function') {
+        bufGeom.setIndex(idxAttr);
+      } else {
+        bufGeom.index = idxAttr;
+      }
+    }
+
+    bufGeom.computeBoundingBox();
+    bufGeom.computeBoundingSphere();
+
+    if (!bufGeom.boundingBox || bufGeom.boundingBox.isEmpty()) continue;
+
+    builtGeoms[g] = bufGeom;
+    localBoxes[g] = bufGeom.boundingBox.clone();
+  }
+
+  // TAHAP 2: Hitung World Matrix & Bounding Box setiap instance untuk normalisasi pusat (0,0,0)
+  const validInstances = [];
+
+  for (let i = 0; i < instances.length; i++) {
+    const inst = instances[i];
+    const bufGeom = builtGeoms[inst.geomId];
+    const localBox = localBoxes[inst.geomId];
+    if (!bufGeom || !localBox) continue;
+
+    const m = inst.mat12;
+    const mat4 = new THREE.Matrix4();
+    mat4.set(
+      m[0], m[3], m[6], m[9],
+      m[1], m[4], m[7], m[10],
+      m[2], m[5], m[8], m[11],
+      0, 0, 0, 1
+    );
+
+    const worldBox = localBox.clone().applyMatrix4(mat4);
+    if (
+      !Number.isFinite(worldBox.min.x) ||
+      !Number.isFinite(worldBox.max.x) ||
+      worldBox.isEmpty()
+    ) {
+      continue;
+    }
+
+    const worldCenter = worldBox.getCenter(new THREE.Vector3());
+    validInstances.push({
+      inst,
+      bufGeom,
+      mat4,
+      worldBox,
+      worldCenter
     });
   }
 
-  // Patch instanceTree.nodeAccess pada SceneBuilder agar getNodeBox dan nama part bekerja di seluruh engine
-  patchSceneBuilderInstanceTree(modelBuilder, modelName);
+  if (validInstances.length === 0) {
+    throw new Error('Tidak ditemukan instance geometri 3D yang valid di dalam paket NWDB v2.');
+  }
 
-  // Tampilkan keseluruhan model 3D secara utuh (Full Framing)
+  // Hitung Median Cluster Center untuk menggeser model ke pusat (0, 0, 0)
+  const xs = validInstances.map((v) => v.worldCenter.x).sort((a, b) => a - b);
+  const ys = validInstances.map((v) => v.worldCenter.y).sort((a, b) => a - b);
+  const zs = validInstances.map((v) => v.worldCenter.z).sort((a, b) => a - b);
+  const midIdx = Math.floor(validInstances.length / 2);
+  const medianCenter = new THREE.Vector3(xs[midIdx], ys[midIdx], zs[midIdx]);
+
+  const dists = validInstances
+    .map((v) => v.worldCenter.distanceTo(medianCenter))
+    .sort((a, b) => a - b);
+  const p95Dist = dists[Math.floor(dists.length * 0.95)] || 100;
+  const clusterRadiusThreshold = Math.max(p95Dist * 6, 500);
+
+  const clusterBox = new THREE.Box3();
+  for (const entry of validInstances) {
+    if (entry.worldCenter.distanceTo(medianCenter) <= clusterRadiusThreshold) {
+      clusterBox.union(entry.worldBox);
+    }
+  }
+  if (clusterBox.isEmpty()) {
+    for (const entry of validInstances) {
+      clusterBox.union(entry.worldBox);
+    }
+  }
+
+  const worldCenterOffset = clusterBox.getCenter(new THREE.Vector3());
+  const normalizedGlobalBox = new THREE.Box3();
+
+  // Geser translasi matriks setiap instance sebesar -worldCenterOffset (Tanpa menyalin vertex!)
+  for (const entry of validInstances) {
+    const me = entry.mat4.elements;
+    me[12] -= worldCenterOffset.x;
+    me[13] -= worldCenterOffset.y;
+    me[14] -= worldCenterOffset.z;
+
+    entry.worldBox.min.sub(worldCenterOffset);
+    entry.worldBox.max.sub(worldCenterOffset);
+    entry.worldCenter.sub(worldCenterOffset);
+
+    if (entry.worldCenter.length() <= clusterRadiusThreshold) {
+      normalizedGlobalBox.union(entry.worldBox);
+    }
+  }
+
+  if (normalizedGlobalBox.isEmpty()) {
+    normalizedGlobalBox.set(new THREE.Vector3(-10, -10, -10), new THREE.Vector3(10, 10, 10));
+  }
+  globalNormalizedBox = normalizedGlobalBox.clone();
+
+  // TAHAP 3: Bangun Model di SceneBuilder dengan Shared BufferGeometry & Pooled Materials
+  const ext = await viewer.loadExtension('Autodesk.Viewing.SceneBuilder');
+  const modelBuilder = await ext.addNewModel({
+    conserveMemory: false,
+    modelNameOverride: modelName || 'Extracted_NWD_Model',
+    bbox: globalNormalizedBox.clone()
+  });
+
+  const materialPool = new Map();
+  function getPooledMaterial(colorHex) {
+    const key = Number(colorHex || 0x38bdf8);
+    let mat = materialPool.get(key);
+    if (!mat) {
+      mat = new THREE.MeshPhongMaterial({
+        color: new THREE.Color(key),
+        specular: new THREE.Color(0x334155),
+        shininess: 38,
+        side: THREE.DoubleSide
+      });
+      modelBuilder.addMaterial(`mat_inst_${key.toString(16)}`, mat);
+      materialPool.set(key, mat);
+    }
+    return mat;
+  }
+
+  for (let i = 0; i < validInstances.length; i++) {
+    const { inst, bufGeom, mat4, worldBox } = validInstances[i];
+    const dbId = Number(inst.dbId || i + 1);
+    const mat = getPooledMaterial(inst.colorHex);
+
+    const mesh = new THREE.Mesh(bufGeom, mat);
+    mesh.dbId = dbId;
+    mesh.PositionIsWorld = false;
+    mesh.matrixAutoUpdate = false;
+    mesh.matrix.copy(mat4);
+    mesh.matrixWorld.copy(mat4);
+
+    modelBuilder.addMesh(mesh);
+
+    const fragId = mesh.fragId;
+    if (fragId !== undefined) {
+      fragIdToDbIdMap.set(fragId, dbId);
+    }
+
+    const existingPart = partRegistry.get(dbId);
+    if (existingPart) {
+      existingPart.bbox.union(worldBox);
+      existingPart.center = existingPart.bbox.getCenter(new THREE.Vector3());
+      existingPart.size = existingPart.bbox.getSize(new THREE.Vector3());
+      if (fragId !== undefined) existingPart.fragIds.push(fragId);
+      existingPart.meshes.push(mesh);
+      existingPart.originalMaterials.push(mat);
+    } else {
+      partRegistry.set(dbId, {
+        dbId,
+        name: inst.name || `Component #${dbId}`,
+        category: inst.category || 'Navisworks Element',
+        system: inst.system || modelName,
+        material: inst.materialName || 'Navisworks Material',
+        colorHex: inst.colorHex || 0x38bdf8,
+        specs: inst.specs || {},
+        bbox: worldBox.clone(),
+        center: worldBox.getCenter(new THREE.Vector3()),
+        size: worldBox.getSize(new THREE.Vector3()),
+        visible: true,
+        selected: false,
+        fragIds: fragId !== undefined ? [fragId] : [],
+        meshes: [mesh],
+        originalMaterial: mat,
+        originalMaterials: [mat],
+        highlightMaterial: null,
+        modelBuilder
+      });
+    }
+  }
+
+  patchSceneBuilderInstanceTree(modelBuilder, modelName);
   fitToViewAll({ resetIso: true, immediate: true });
   notifyHierarchyChanged();
 

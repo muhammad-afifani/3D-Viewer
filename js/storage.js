@@ -496,6 +496,24 @@ export async function importDirectLocal3DFile(file, onProgress) {
     onProgress({ percent: 15, message: `Membaca file lokal ${file.name}...` });
   }
 
+  // Hapus otomatis model lama dengan nama sama (atau file .nwdjson raksasa >400MB versi lama)
+  // agar IndexedDB tidak penuh dan tidak memicu crash RAM (Aw, Snap!)
+  try {
+    const existingModels = await listOfflineModels();
+    for (const m of existingModels) {
+      const isSameName = m.name === file.name;
+      const isOversizedLegacyNwd =
+        m.name &&
+        m.name.toLowerCase().endsWith('.nwdjson') &&
+        m.totalSize > 400 * 1024 * 1024;
+      if (isSameName || isOversizedLegacyNwd) {
+        await deleteOfflineModel(m.id);
+      }
+    }
+  } catch (cleanupErr) {
+    console.warn('[Storage] Gagal membersihkan model duplikat lama:', cleanupErr);
+  }
+
   const arrayBuffer = await file.arrayBuffer();
   const modelId = `model_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
   const safePath = `local_model/${file.name.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
