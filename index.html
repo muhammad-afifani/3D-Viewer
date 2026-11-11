@@ -106,8 +106,12 @@
         <!-- Sidebar Navigation Tabs -->
         <nav class="sidebar-tabs" aria-label="Sidebar Navigation">
           <button class="sidebar-tab active" data-tab="tabLibrary">
-            <span>Offline Library</span>
+            <span>Library</span>
             <span id="badgeModelCount" class="tab-badge">0</span>
+          </button>
+          <button class="sidebar-tab" data-tab="tabTree">
+            <span>Selection Tree</span>
+            <span id="badgeTreeCount" class="tab-badge">0</span>
           </button>
           <button class="sidebar-tab" data-tab="tabCloud">
             <span>Cloud .NWD</span>
@@ -304,6 +308,69 @@
           </div>
 
           <!-- ==============================================================
+               TAB 1B: SELECTION TREE (MODEL HIERARCHY) & HIDE/UNHIDE/ISOLATE
+               ============================================================== -->
+          <div id="tabTree" class="tab-pane">
+            <div class="panel-section tree-panel-section">
+              <div class="section-header">
+                <span class="section-title">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M3 6h18M7 12h14M11 18h10" />
+                  </svg>
+                  Selection Tree (Hierarchy)
+                </span>
+                <div style="display: flex; gap: 4px;">
+                  <button id="btnTreeExpandAll" class="btn btn-sm" style="height: 22px; padding: 0 6px; font-size: 10.5px;" title="Buka / Tutup Semua Kategori">
+                    Expand
+                  </button>
+                  <button id="btnTreeShowAll" class="btn btn-sm" style="height: 22px; padding: 0 6px; font-size: 10.5px;" title="Tampilkan Kembali Semua Part (Unhide All)">
+                    👁️ Show All
+                  </button>
+                </div>
+              </div>
+
+              <div class="tree-legend-hint">
+                <span><strong>Klik 1x</strong>: Pilih &amp; Set Pivot Orbit</span>
+                <span>&bull;</span>
+                <span><strong>Klik 2x / 🎯</strong>: Focus Zoom</span>
+                <span>&bull;</span>
+                <span><strong>👁️</strong>: Hide/Unhide</span>
+              </div>
+
+              <!-- Filter / Search cepat di dalam Selection Tree -->
+              <div class="tree-filter-box">
+                <input id="inputFilterTree" type="text" class="form-input" style="height: 30px; font-size: 11.5px;" placeholder="Filter nama part / kategori di Tree..." />
+              </div>
+
+              <!-- Daftar Hirarki Kategori & Part 3D -->
+              <div id="selectionTreeContainer" class="selection-tree-container">
+                <div class="empty-list-state">
+                  Muat model 3D (<code>.ifc</code>, <code>.glb</code>, <code>.nwdjson</code>, <code>.svf</code>, atau Demo) untuk menampilkan hirarki <strong>Selection Tree</strong>.
+                </div>
+              </div>
+            </div>
+
+            <!-- Panel Properti Objek Terpilih langsung di bawah Selection Tree -->
+            <div class="panel-section">
+              <div class="section-header">
+                <span class="section-title">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <circle cx="12" cy="12" r="10" />
+                    <line x1="12" y1="16" x2="12" y2="12" />
+                    <line x1="12" y1="8" x2="12.01" y2="8" />
+                  </svg>
+                  Selected Part Properties
+                </span>
+              </div>
+              <div id="treeSelectionInspectorBox">
+                <div class="section-desc">
+                  Klik 1x pada part di 3D Viewport atau di Selection Tree untuk melihat properti BIM dan mengatur titik pusat putaran (Orbit Pivot).
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- ==============================================================
                TAB 3: SAVED VIEWPOINTS & BIM INSPECTOR
                ============================================================== -->
           <div id="tabViewpoints" class="tab-pane">
@@ -365,7 +432,7 @@
               <input id="inputSearchModel" type="text" placeholder="Cari item / pipa / tag (Enter)..." />
               <span id="searchMatchCount" class="search-count"></span>
             </div>
-            <button id="btnSearchModel" class="btn btn-sm" title="Cari &amp; Isolate Objek">Cari</button>
+            <button id="btnSearchModel" class="btn btn-sm" title="Cari &amp; Pilih Objek">Cari</button>
             <button id="btnSearchPrev" class="btn btn-icon btn-sm" title="Hasil Sebelumnya">&lsaquo;</button>
             <button id="btnSearchNext" class="btn btn-icon btn-sm" title="Hasil Berikutnya">&rsaquo;</button>
           </div>
@@ -374,17 +441,20 @@
 
           <!-- Group Tengah: Visibilitas & Navigasi Ala Navisworks -->
           <div class="toolbar-group">
-            <button id="btnFitView" class="btn btn-sm" title="Fit to View (Zoom ke objek terpilih atau seluruh model)">
-              Fit View
+            <button id="btnFitView" class="btn btn-sm" title="Fit All (Home): Tampilkan seluruh model 3D secara utuh dari ujung ke ujung">
+              🔍 Fit All
             </button>
-            <button id="btnIsolate" class="btn btn-sm" title="Isolate Objek yang Dipilih">
-              Isolate
+            <button id="btnFocusSelected" class="btn btn-sm" title="Focus Part (F): Zoom &amp; arahkan kamera pas ke part yang sedang dipilih">
+              🎯 Focus Part
             </button>
-            <button id="btnHide" class="btn btn-sm" title="Sembunyikan (Hide) Objek yang Dipilih">
-              Hide
+            <button id="btnIsolate" class="btn btn-sm" title="Isolate (I): Hanya tampilkan part yang dipilih">
+              ⚡ Isolate
             </button>
-            <button id="btnShowAll" class="btn btn-sm" title="Tampilkan Kembali Seluruh Elemen Model (Reset Isolate/Hide)">
-              Show All
+            <button id="btnHide" class="btn btn-sm" title="Hide (H): Sembunyikan part yang dipilih">
+              👁️ Hide
+            </button>
+            <button id="btnShowAll" class="btn btn-sm" title="Show All (U / Esc): Tampilkan kembali seluruh part yang tersembunyi">
+              🔄 Show All
             </button>
             <button id="btnGhosting" class="btn btn-primary btn-sm" title="Aktifkan/Nonaktifkan Efek Ghosting Transparan">
               Ghosting
@@ -425,6 +495,41 @@
         <div class="viewer-stage">
           <!-- Container Utama Autodesk Viewer v7 -->
           <div id="forgeViewer"></div>
+
+          <!-- Visual 3D Orbit Pivot Point Indicator (Autodesk / Navisworks Style) -->
+          <div id="orbitPivotIndicator" class="orbit-pivot-indicator hidden">
+            <span class="pivot-dot"></span>
+            <span class="pivot-ring"></span>
+          </div>
+
+          <!-- Floating Quick Action Bar (Bottom-Center Autodesk Viewer Style) -->
+          <div id="floatingQuickBar" class="floating-quick-bar hidden">
+            <div id="quickBarSelectedLabel" class="quick-bar-selected-label" title="Part yang sedang dipilih (Pivot Orbit aktif)">
+              Klik 1x Part: Pilih &amp; Set Pivot • Klik 2x: Zoom Part
+            </div>
+            <div class="quick-bar-buttons">
+              <button id="btnQuickFitAll" class="quick-action-btn" title="Fit All (Shortcut: Home) — Tampilkan seluruh model 3D secara utuh">
+                <span>🔍 Fit All</span>
+                <kbd>Home</kbd>
+              </button>
+              <button id="btnQuickFocusPart" class="quick-action-btn" title="Focus Part (Shortcut: F atau Double-Click) — Zoom ke part yang dipilih">
+                <span>🎯 Focus Part</span>
+                <kbd>F</kbd>
+              </button>
+              <button id="btnQuickHidePart" class="quick-action-btn" title="Hide / Unhide Part (Shortcut: H) — Sembunyikan part yang dipilih">
+                <span>👁️‍🗨️ Hide</span>
+                <kbd>H</kbd>
+              </button>
+              <button id="btnQuickIsolatePart" class="quick-action-btn" title="Isolate Part (Shortcut: I) — Sembunyikan semua part lain">
+                <span>⚡ Isolate</span>
+                <kbd>I</kbd>
+              </button>
+              <button id="btnQuickShowAll" class="quick-action-btn" title="Show All (Shortcut: U / Esc) — Tampilkan kembali semua part yang di-hide">
+                <span>🔄 Show All</span>
+                <kbd>U</kbd>
+              </button>
+            </div>
+          </div>
 
           <!-- First-Person Walk HUD Banner -->
           <div id="walkHudBanner" class="walk-hud-banner hidden">

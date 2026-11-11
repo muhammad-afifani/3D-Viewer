@@ -40,6 +40,11 @@ import {
   searchObjectsInModel,
   isolateAndFocusDbIds,
   fitToView,
+  fitToViewAll,
+  focusOnDbIds,
+  selectPartById,
+  setPartsVisibility,
+  getModelHierarchyTree,
   isolateSelected,
   hideSelected,
   showAllObjects,
@@ -62,7 +67,10 @@ const appState = {
   searchMatches: [],
   searchCursor: -1,
   deferredInstallPrompt: null,
-  isBusy: false
+  isBusy: false,
+  collapsedCategories: new Set(),
+  expandedFullCategories: new Set(),
+  allCategoriesCollapsed: false
 };
 
 // Referensi Elemen DOM
@@ -87,6 +95,7 @@ function cacheDomElements() {
   dom.tabButtons = document.querySelectorAll('.sidebar-tab');
   dom.tabPanes = document.querySelectorAll('.tab-pane');
   dom.badgeModelCount = document.getElementById('badgeModelCount');
+  dom.badgeTreeCount = document.getElementById('badgeTreeCount');
   dom.badgeViewpointCount = document.getElementById('badgeViewpointCount');
 
   // Tab 1: Offline Library & ZIP/Local 3D Importer
@@ -98,6 +107,13 @@ function cacheDomElements() {
   dom.offlineModelList = document.getElementById('offlineModelList');
   dom.btnCreateDemoModel = document.getElementById('btnCreateDemoModel');
   dom.storageQuotaLabel = document.getElementById('storageQuotaLabel');
+
+  // Tab 1B: Selection Tree (Model Hierarchy)
+  dom.btnTreeExpandAll = document.getElementById('btnTreeExpandAll');
+  dom.btnTreeShowAll = document.getElementById('btnTreeShowAll');
+  dom.inputFilterTree = document.getElementById('inputFilterTree');
+  dom.selectionTreeContainer = document.getElementById('selectionTreeContainer');
+  dom.treeSelectionInspectorBox = document.getElementById('treeSelectionInspectorBox');
 
   // Tab 2: Free NWD Extractor & Cloud NWD Converter (APS)
   dom.btnCopyFreeExtractor = document.getElementById('btnCopyFreeExtractor');
@@ -130,6 +146,7 @@ function cacheDomElements() {
   dom.btnSearchPrev = document.getElementById('btnSearchPrev');
   dom.btnSearchNext = document.getElementById('btnSearchNext');
   dom.btnFitView = document.getElementById('btnFitView');
+  dom.btnFocusSelected = document.getElementById('btnFocusSelected');
   dom.btnIsolate = document.getElementById('btnIsolate');
   dom.btnHide = document.getElementById('btnHide');
   dom.btnShowAll = document.getElementById('btnShowAll');
@@ -141,8 +158,15 @@ function cacheDomElements() {
   dom.selectTheme = document.getElementById('selectTheme');
   dom.btnQuickSaveViewpoint = document.getElementById('btnQuickSaveViewpoint');
 
-  // 3D Stage & Overlays
+  // 3D Stage, Floating Quick Action Bar, & Overlays
   dom.forgeViewer = document.getElementById('forgeViewer');
+  dom.floatingQuickBar = document.getElementById('floatingQuickBar');
+  dom.quickBarSelectedLabel = document.getElementById('quickBarSelectedLabel');
+  dom.btnQuickFitAll = document.getElementById('btnQuickFitAll');
+  dom.btnQuickFocusPart = document.getElementById('btnQuickFocusPart');
+  dom.btnQuickHidePart = document.getElementById('btnQuickHidePart');
+  dom.btnQuickIsolatePart = document.getElementById('btnQuickIsolatePart');
+  dom.btnQuickShowAll = document.getElementById('btnQuickShowAll');
   dom.viewerEmptyOverlay = document.getElementById('viewerEmptyOverlay');
   dom.btnEmptyImportZip = document.getElementById('btnEmptyImportZip');
   dom.btnEmptyConvertNwd = document.getElementById('btnEmptyConvertNwd');
@@ -405,17 +429,27 @@ async function handleOpenOfflineModel(modelId) {
     dom.viewerEmptyOverlay.classList.add('hidden');
     dom.statusActiveModel.innerHTML = `Model: <strong>Memuat ${escapeHtml(target.name)}...</strong>`;
 
-    await loadOfflineModel(target, dom.forgeViewer, handleViewerSelectionChanged);
+    appState.collapsedCategories.clear();
+    appState.expandedFullCategories.clear();
+
+    await loadOfflineModel(
+      target,
+      dom.forgeViewer,
+      handleViewerSelectionChanged,
+      renderSelectionTreeUI
+    );
 
     appState.activeModel = target;
+    dom.floatingQuickBar?.classList.remove('hidden');
     dom.statusActiveModel.innerHTML = `Model: <strong>${escapeHtml(target.name)}</strong>`;
     dom.statusRenderMode.innerHTML = `Mode: <strong>${
       target.isDemo ? 'OFFLINE DEMO BIM' : '100% OFFLINE (IndexedDB / SW)'
     }</strong>`;
 
     await refreshOfflineLibraryUI();
+    renderSelectionTreeUI();
     refreshViewpointsUI();
-    showToast(`Model "${target.name}" berhasil dimuat dalam mode Offline.`, 'success');
+    showToast(`Model "${target.name}" berhasil dimuat utuh. Klik 1x untuk pilih & set pivot, Klik 2x untuk zoom part.`, 'success');
   } catch (err) {
     console.error('Error loading offline model:', err);
     showToast(err.message || 'Gagal memuat model 3D Offline.', 'error', 6000);
@@ -446,31 +480,203 @@ async function handleCreateAndOpenDemoModel() {
     }
 
     await handleOpenOfflineModel(demoModel.id);
-    switchSidebarTab('tabLibrary');
+    switchSidebarTab('tabTree');
   } catch (err) {
     showToast(`Gagal memuat model demo: ${err.message}`, 'error');
   }
 }
 
 /**
- * Callback ketika objek 3D diklik pada kanvas Autodesk Viewer.
+ * Me-render hirarki Selection Tree (Kategori -> Daftar Part) lengkap dengan tombol
+ * Focus (🎯) dan Toggle Hide/Unhide (👁️).
  */
-function handleViewerSelectionChanged(selectionInfo) {
-  if (!selectionInfo || !selectionInfo.dbIds || selectionInfo.dbIds.length === 0) {
-    dom.statusSelectedElement.innerHTML = `Seleksi: <strong>Tidak ada</strong>`;
-    dom.selectionInspectorBox.innerHTML = `
-      <div class="section-desc">
-        Klik elemen peralatan, pipa, valve, atau struktur baja di 3D Viewport untuk menginspeksi metadata BIM.
+function renderSelectionTreeUI(treeDataInput = null) {
+  if (!dom.selectionTreeContainer) return;
+  const treeData = treeDataInput || getModelHierarchyTree();
+  if (dom.badgeTreeCount) {
+    dom.badgeTreeCount.textContent = String(treeData.totalCount || 0);
+  }
+
+  if (!treeData.categories || treeData.categories.length === 0) {
+    dom.selectionTreeContainer.innerHTML = `
+      <div class="empty-list-state">
+        Muat model 3D (<code>.ifc</code>, <code>.glb</code>, <code>.nwdjson</code>, <code>.svf</code>, atau Demo) untuk menampilkan hirarki <strong>Selection Tree</strong>.
       </div>
     `;
     return;
   }
 
+  const filterQuery = String(dom.inputFilterTree?.value || '')
+    .trim()
+    .toLowerCase();
+
+  // Jika jumlah kategori banyak (>8) dan baru pertama kali dimuat, ciutkan secara default agar rapi
+  if (
+    treeData.totalCount > 120 &&
+    appState.collapsedCategories.size === 0 &&
+    !appState.allCategoriesCollapsed &&
+    !filterQuery
+  ) {
+    treeData.categories.slice(2).forEach((c) => appState.collapsedCategories.add(c.category));
+  }
+
+  const htmlChunks = [];
+  const MAX_ITEMS_PREVIEW = 150;
+
+  for (const cat of treeData.categories) {
+    const filteredParts = filterQuery
+      ? cat.parts.filter(
+          (p) =>
+            p.name.toLowerCase().includes(filterQuery) ||
+            cat.category.toLowerCase().includes(filterQuery)
+        )
+      : cat.parts;
+
+    if (filteredParts.length === 0) continue;
+
+    const isCollapsed = !filterQuery && appState.collapsedCategories.has(cat.category);
+    const isFullExpanded = filterQuery || appState.expandedFullCategories.has(cat.category);
+    const visibleSlice = isFullExpanded
+      ? filteredParts
+      : filteredParts.slice(0, MAX_ITEMS_PREVIEW);
+    const remainingCount = filteredParts.length - visibleSlice.length;
+
+    const catEyeIcon = cat.someVisible ? '👁️' : '🚫';
+    const catHiddenClass = !cat.someVisible ? 'is-hidden' : '';
+
+    const childrenHtml = visibleSlice
+      .map((part) => {
+        const selectedClass = part.selected ? 'is-selected' : '';
+        const hiddenClass = !part.visible ? 'is-hidden' : '';
+        const eyeBtnClass = !part.visible ? 'is-off' : '';
+        const eyeIcon = part.visible ? '👁️' : '🚫';
+
+        return `
+          <div class="tree-node-row ${selectedClass} ${hiddenClass}" data-dbid="${part.dbId}" data-category="${escapeHtml(cat.category)}">
+            <span class="tree-node-label" data-action="tree-select-part" data-dbid="${part.dbId}" title="${escapeHtml(part.name)} (Klik 1x: Pilih &amp; Set Pivot • Klik 2x: Focus Zoom)">
+              ${escapeHtml(part.name)}
+            </span>
+            <div class="tree-node-actions">
+              <button class="tree-action-btn" data-action="tree-focus-part" data-dbid="${part.dbId}" title="Focus &amp; Zoom ke Part ini (F)">
+                🎯
+              </button>
+              <button class="tree-action-btn ${eyeBtnClass}" data-action="tree-toggle-part" data-dbid="${part.dbId}" title="${part.visible ? 'Sembunyikan (Hide) Part ini' : 'Tampilkan Kembali (Unhide) Part ini'}">
+                ${eyeIcon}
+              </button>
+            </div>
+          </div>
+        `;
+      })
+      .join('');
+
+    const showMoreBtnHtml =
+      remainingCount > 0
+        ? `
+          <button class="btn btn-sm" data-action="tree-expand-more" data-category="${escapeHtml(cat.category)}" style="margin: 4px 6px; height: 24px; font-size: 10.5px;">
+            + Tampilkan ${remainingCount} part lainnya di ${escapeHtml(cat.category)}
+          </button>
+        `
+        : '';
+
+    htmlChunks.push(`
+      <div class="tree-category-group ${isCollapsed ? 'collapsed' : ''} ${catHiddenClass}" data-category="${escapeHtml(cat.category)}">
+        <div class="tree-category-header" data-action="tree-toggle-collapse" data-category="${escapeHtml(cat.category)}">
+          <div class="tree-cat-left">
+            <span class="tree-chevron">▾</span>
+            <span class="tree-cat-title" title="${escapeHtml(cat.category)}">${escapeHtml(cat.category)}</span>
+            <span class="tree-cat-count">${filteredParts.length}</span>
+          </div>
+          <div class="tree-node-actions">
+            <button class="tree-action-btn" data-action="tree-focus-cat" data-category="${escapeHtml(cat.category)}" title="Focus &amp; Zoom ke Kategori ini">
+              🎯
+            </button>
+            <button class="tree-action-btn ${!cat.someVisible ? 'is-off' : ''}" data-action="tree-toggle-cat" data-category="${escapeHtml(cat.category)}" title="${cat.someVisible ? 'Sembunyikan Seluruh Kategori ini' : 'Tampilkan Kembali Seluruh Kategori ini'}">
+              ${catEyeIcon}
+            </button>
+          </div>
+        </div>
+        <div class="tree-category-children">
+          ${childrenHtml}
+          ${showMoreBtnHtml}
+        </div>
+      </div>
+    `);
+  }
+
+  dom.selectionTreeContainer.innerHTML =
+    htmlChunks.join('') ||
+    `<div class="empty-list-state">Tidak ada part yang cocok dengan filter "${escapeHtml(filterQuery)}".</div>`;
+}
+
+/**
+ * Callback ketika objek 3D diklik pada kanvas Autodesk Viewer atau di Selection Tree.
+ */
+function handleViewerSelectionChanged(selectionInfo) {
+  if (!selectionInfo || !selectionInfo.dbIds || selectionInfo.dbIds.length === 0) {
+    dom.statusSelectedElement.innerHTML = `Seleksi: <strong>Tidak ada</strong>`;
+    if (dom.quickBarSelectedLabel) {
+      dom.quickBarSelectedLabel.textContent =
+        'Klik 1x Part: Pilih & Set Pivot • Klik 2x / F: Zoom Part';
+    }
+    const emptyHtml = `
+      <div class="section-desc">
+        Klik 1x elemen di 3D Viewport atau di Selection Tree untuk menginspeksi metadata BIM &amp; mengatur pusat putaran (Orbit Pivot).
+      </div>
+    `;
+    if (dom.selectionInspectorBox) dom.selectionInspectorBox.innerHTML = emptyHtml;
+    if (dom.treeSelectionInspectorBox) dom.treeSelectionInspectorBox.innerHTML = emptyHtml;
+
+    // Bersihkan highlight pada Selection Tree
+    if (dom.selectionTreeContainer) {
+      dom.selectionTreeContainer
+        .querySelectorAll('.tree-node-row.is-selected')
+        .forEach((el) => el.classList.remove('is-selected'));
+    }
+    return;
+  }
+
+  const primaryDbId = Number(selectionInfo.dbIds[0]);
   dom.statusSelectedElement.innerHTML = `Seleksi: <strong>${escapeHtml(selectionInfo.name)}</strong>`;
+  if (dom.quickBarSelectedLabel) {
+    dom.quickBarSelectedLabel.textContent = `Terpilih: ${selectionInfo.name} (Pivot Aktif)`;
+  }
+
+  // Sinkronkan & scroll otomatis ke item yang dipilih pada Selection Tree
+  if (dom.selectionTreeContainer) {
+    dom.selectionTreeContainer
+      .querySelectorAll('.tree-node-row.is-selected')
+      .forEach((el) => el.classList.remove('is-selected'));
+
+    let targetRow = dom.selectionTreeContainer.querySelector(
+      `.tree-node-row[data-dbid="${primaryDbId}"]`
+    );
+
+    // Jika part berada di kategori yang sedang terpotong (>150 item), buka penuh kategorinya
+    if (!targetRow && selectionInfo.props?.category) {
+      appState.expandedFullCategories.add(selectionInfo.props.category);
+      appState.collapsedCategories.delete(selectionInfo.props.category);
+      renderSelectionTreeUI();
+      targetRow = dom.selectionTreeContainer.querySelector(
+        `.tree-node-row[data-dbid="${primaryDbId}"]`
+      );
+    }
+
+    if (targetRow) {
+      const parentGroup = targetRow.closest('.tree-category-group');
+      if (parentGroup && parentGroup.classList.contains('collapsed')) {
+        const catName = parentGroup.dataset.category;
+        if (catName) appState.collapsedCategories.delete(catName);
+        parentGroup.classList.remove('collapsed');
+      }
+      targetRow.classList.add('is-selected');
+      targetRow.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+  }
 
   const props = selectionInfo.props;
+  let inspectorHtml = '';
+
   if (props && props.specs) {
-    // Metadata dari Industrial Plant Demo BIM
     const rowsHtml = Object.entries(props.specs)
       .map(
         ([k, v]) => `
@@ -482,7 +688,7 @@ function handleViewerSelectionChanged(selectionInfo) {
       )
       .join('');
 
-    dom.selectionInspectorBox.innerHTML = `
+    inspectorHtml = `
       <div style="font-weight:600;color:var(--accent-primary);font-size:12px;margin-bottom:4px;">
         ${escapeHtml(props.name)}
       </div>
@@ -492,7 +698,6 @@ function handleViewerSelectionChanged(selectionInfo) {
       <div>${rowsHtml}</div>
     `;
   } else if (props && Array.isArray(props.properties)) {
-    // Metadata standar dari SVF PropertyDatabase
     const topProps = props.properties.slice(0, 12);
     const rowsHtml = topProps
       .map(
@@ -505,12 +710,17 @@ function handleViewerSelectionChanged(selectionInfo) {
       )
       .join('');
 
-    dom.selectionInspectorBox.innerHTML = `
+    inspectorHtml = `
       <div style="font-weight:600;color:var(--accent-primary);font-size:12px;margin-bottom:6px;">
         ${escapeHtml(props.name || selectionInfo.name)}
       </div>
       <div>${rowsHtml || '<span class="section-desc">Buka panel Properties di toolbar bawah Viewer untuk detail lengkap.</span>'}</div>
     `;
+  }
+
+  if (inspectorHtml) {
+    if (dom.selectionInspectorBox) dom.selectionInspectorBox.innerHTML = inspectorHtml;
+    if (dom.treeSelectionInspectorBox) dom.treeSelectionInspectorBox.innerHTML = inspectorHtml;
   }
 }
 
@@ -1071,7 +1281,16 @@ function bindEventListeners() {
     try {
       const tokenData = await authenticateAPS(creds.clientId, creds.clientSecret);
       dom.viewerEmptyOverlay.classList.add('hidden');
-      await loadCloudModelByUrn(rawUrn, tokenData.access_token, dom.forgeViewer, handleViewerSelectionChanged);
+      await loadCloudModelByUrn(
+        rawUrn,
+        tokenData.access_token,
+        dom.forgeViewer,
+        handleViewerSelectionChanged,
+        renderSelectionTreeUI
+      );
+      if (dom.floatingQuickBar) {
+        dom.floatingQuickBar.classList.remove('hidden');
+      }
       dom.statusActiveModel.innerHTML = `Model: <strong>Cloud URN (${escapeHtml(rawUrn.slice(0, 14))}...)</strong>`;
       dom.statusRenderMode.innerHTML = `Mode: <strong>CLOUD STREAMING (APS)</strong>`;
       showToast('Model Cloud URN berhasil dimuat.', 'success');
@@ -1079,6 +1298,109 @@ function bindEventListeners() {
       showToast(err.message, 'error');
     }
   });
+
+  // Selection Tree (Model Hierarchy) Event Delegation
+  if (dom.selectionTreeContainer) {
+    dom.selectionTreeContainer.addEventListener('click', (e) => {
+      const actionEl = e.target.closest('[data-action]');
+      if (!actionEl) return;
+      const action = actionEl.dataset.action;
+
+      if (action === 'tree-select-part') {
+        const dbId = Number(actionEl.dataset.dbid);
+        if (!Number.isNaN(dbId)) {
+          selectPartById(dbId, { setPivot: true, zoomToPart: false });
+        }
+      } else if (action === 'tree-focus-part') {
+        e.stopPropagation();
+        const dbId = Number(actionEl.dataset.dbid);
+        if (!Number.isNaN(dbId)) {
+          selectPartById(dbId, { setPivot: true, zoomToPart: true });
+        }
+      } else if (action === 'tree-toggle-part') {
+        e.stopPropagation();
+        const dbId = Number(actionEl.dataset.dbid);
+        if (!Number.isNaN(dbId)) {
+          const rowEl = actionEl.closest('.tree-node-row');
+          const currentlyHidden = rowEl ? rowEl.classList.contains('is-hidden') : false;
+          setPartsVisibility([dbId], currentlyHidden);
+        }
+      } else if (action === 'tree-toggle-collapse') {
+        // Jangan collapse jika yang diklik tombol aksi di dalam header kategori
+        if (e.target.closest('.tree-action-btn')) return;
+        const catName = actionEl.dataset.category;
+        if (!catName) return;
+        const groupEl = actionEl.closest('.tree-category-group');
+        if (appState.collapsedCategories.has(catName)) {
+          appState.collapsedCategories.delete(catName);
+          if (groupEl) groupEl.classList.remove('collapsed');
+        } else {
+          appState.collapsedCategories.add(catName);
+          if (groupEl) groupEl.classList.add('collapsed');
+        }
+      } else if (action === 'tree-focus-cat') {
+        e.stopPropagation();
+        const catName = actionEl.dataset.category;
+        const catGroup = getModelHierarchyTree().find((c) => c.category === catName);
+        if (catGroup && catGroup.parts.length > 0) {
+          const ids = catGroup.parts.map((p) => p.dbId);
+          focusOnDbIds(ids);
+        }
+      } else if (action === 'tree-toggle-cat') {
+        e.stopPropagation();
+        const catName = actionEl.dataset.category;
+        const catGroup = getModelHierarchyTree().find((c) => c.category === catName);
+        if (catGroup && catGroup.parts.length > 0) {
+          const ids = catGroup.parts.map((p) => p.dbId);
+          const nextVisible = !catGroup.someVisible;
+          setPartsVisibility(ids, nextVisible);
+        }
+      } else if (action === 'tree-expand-more') {
+        const catName = actionEl.dataset.category;
+        if (catName) {
+          appState.expandedFullCategories.add(catName);
+          renderSelectionTreeUI();
+        }
+      }
+    });
+
+    // Double-Click pada item di Selection Tree -> Focus & Zoom-to-Fit ke Part tersebut
+    dom.selectionTreeContainer.addEventListener('dblclick', (e) => {
+      const labelEl = e.target.closest('[data-action="tree-select-part"]');
+      if (!labelEl) return;
+      const dbId = Number(labelEl.dataset.dbid);
+      if (!Number.isNaN(dbId)) {
+        selectPartById(dbId, { setPivot: true, zoomToPart: true });
+      }
+    });
+  }
+
+  if (dom.inputFilterTree) {
+    dom.inputFilterTree.addEventListener('input', () => {
+      renderSelectionTreeUI();
+    });
+  }
+
+  if (dom.btnTreeExpandAll) {
+    dom.btnTreeExpandAll.addEventListener('click', () => {
+      const hierarchy = getModelHierarchyTree();
+      if (!appState.allCategoriesCollapsed) {
+        hierarchy.forEach((c) => appState.collapsedCategories.add(c.category));
+        appState.allCategoriesCollapsed = true;
+      } else {
+        appState.collapsedCategories.clear();
+        appState.allCategoriesCollapsed = false;
+      }
+      renderSelectionTreeUI();
+    });
+  }
+
+  if (dom.btnTreeShowAll) {
+    dom.btnTreeShowAll.addEventListener('click', () => {
+      showAllObjects();
+      showToast('Seluruh part yang tersembunyi ditampilkan kembali.', 'info', 1800);
+    });
+  }
 
   // CAD Top Toolbar Controls
   dom.btnSearchModel.addEventListener('click', handleExecuteSearch);
@@ -1088,10 +1410,56 @@ function bindEventListeners() {
   dom.btnSearchPrev.addEventListener('click', () => handleCycleSearchMatch(-1));
   dom.btnSearchNext.addEventListener('click', () => handleCycleSearchMatch(1));
 
-  dom.btnFitView.addEventListener('click', fitToView);
+  dom.btnFitView.addEventListener('click', () => fitToViewAll(true));
+  if (dom.btnFocusSelected) {
+    dom.btnFocusSelected.addEventListener('click', () => focusOnDbIds());
+  }
   dom.btnIsolate.addEventListener('click', isolateSelected);
   dom.btnHide.addEventListener('click', hideSelected);
   dom.btnShowAll.addEventListener('click', showAllObjects);
+
+  // Floating Quick Action Bar (Bottom Center)
+  if (dom.btnQuickFitAll) {
+    dom.btnQuickFitAll.addEventListener('click', () => fitToViewAll(true));
+  }
+  if (dom.btnQuickFocusPart) {
+    dom.btnQuickFocusPart.addEventListener('click', () => focusOnDbIds());
+  }
+  if (dom.btnQuickHidePart) {
+    dom.btnQuickHidePart.addEventListener('click', hideSelected);
+  }
+  if (dom.btnQuickIsolatePart) {
+    dom.btnQuickIsolatePart.addEventListener('click', isolateSelected);
+  }
+  if (dom.btnQuickShowAll) {
+    dom.btnQuickShowAll.addEventListener('click', showAllObjects);
+  }
+
+  // Global CAD Keyboard Shortcuts (Home, F, H, I, U, Esc)
+  window.addEventListener('keydown', (e) => {
+    const tag = (e.target && e.target.tagName) ? e.target.tagName.toLowerCase() : '';
+    if (tag === 'input' || tag === 'textarea' || tag === 'select' || e.target?.isContentEditable) {
+      return;
+    }
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+
+    const key = e.key.toLowerCase();
+    if (e.key === 'Home') {
+      e.preventDefault();
+      fitToViewAll(true);
+    } else if (key === 'f') {
+      e.preventDefault();
+      focusOnDbIds();
+    } else if (key === 'h') {
+      e.preventDefault();
+      hideSelected();
+    } else if (key === 'i') {
+      e.preventDefault();
+      isolateSelected();
+    } else if (key === 'u' || e.key === 'Escape') {
+      showAllObjects();
+    }
+  });
 
   dom.btnGhosting.addEventListener('click', () => {
     const isGhost = toggleGhosting();

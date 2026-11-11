@@ -338,11 +338,11 @@ textarea {
 /* Sidebar Navigation Tabs */
 .sidebar-tabs {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(4, 1fr);
   background: var(--bg-canvas);
   border-bottom: 1px solid var(--border-subtle);
   padding: 4px;
-  gap: 4px;
+  gap: 3px;
   flex-shrink: 0;
 }
 
@@ -350,9 +350,9 @@ textarea {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 5px;
-  padding: 7px 6px;
-  font-size: 11.5px;
+  gap: 4px;
+  padding: 7px 4px;
+  font-size: 11px;
   font-weight: 500;
   color: var(--text-secondary);
   background: transparent;
@@ -360,6 +360,7 @@ textarea {
   border-radius: var(--radius-sm);
   cursor: pointer;
   transition: all var(--transition-fast);
+  white-space: nowrap;
 }
 
 .sidebar-tab:hover {
@@ -1245,7 +1246,7 @@ textarea {
 }
 
 /* ==========================================================================
-   6. Autodesk Viewer v7 UI Customizations
+   6. Autodesk Viewer v7 UI Customizations & Selection Tree + Quick Action Bar
    ========================================================================== */
 .adsk-viewing-viewer {
   background: transparent !important;
@@ -1271,6 +1272,304 @@ textarea {
   border: 1px solid var(--border-default) !important;
   border-radius: var(--radius-md) !important;
   box-shadow: var(--shadow-panel) !important;
+}
+
+/* Selection Tree (Model Hierarchy) */
+.tree-panel-section {
+  flex: 1;
+  min-height: 280px;
+  max-height: 58vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.tree-legend-hint {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  font-size: 10.5px;
+  color: var(--text-muted);
+  background: var(--bg-canvas);
+  padding: 5px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
+}
+
+.selection-tree-container {
+  flex: 1;
+  overflow-y: auto;
+  background: var(--bg-canvas);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-height: 180px;
+  max-height: 44vh;
+}
+
+.tree-category-group {
+  border-bottom: 1px solid hsla(218, 22%, 18%, 0.5);
+  padding-bottom: 2px;
+}
+
+.tree-category-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 5px 6px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface-1);
+  cursor: pointer;
+  user-select: none;
+  transition: background var(--transition-fast);
+}
+
+.tree-category-header:hover {
+  background: var(--bg-surface-3);
+}
+
+.tree-cat-left {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  flex: 1;
+}
+
+.tree-chevron {
+  font-size: 10px;
+  color: var(--text-muted);
+  width: 12px;
+  text-align: center;
+  transition: transform 150ms ease;
+}
+
+.tree-category-group.collapsed .tree-chevron {
+  transform: rotate(-90deg);
+}
+
+.tree-category-group.collapsed .tree-category-children {
+  display: none;
+}
+
+.tree-cat-title {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tree-cat-count {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--accent-primary);
+  background: var(--bg-surface-2);
+  padding: 1px 5px;
+  border-radius: 99px;
+}
+
+.tree-category-children {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 2px 0 2px 12px;
+}
+
+.tree-node-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  padding: 4px 6px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: all 100ms ease;
+}
+
+.tree-node-row:hover {
+  background: var(--bg-surface-2);
+  border-color: var(--border-subtle);
+}
+
+.tree-node-row.is-selected {
+  background: hsla(199, 89%, 48%, 0.18);
+  border-color: var(--accent-primary);
+}
+
+.tree-node-row.is-hidden,
+.tree-category-group.is-hidden > .tree-category-header .tree-cat-title {
+  opacity: 0.48;
+}
+
+.tree-node-row.is-hidden .tree-node-label {
+  text-decoration: line-through;
+  color: var(--text-muted);
+}
+
+.tree-node-label {
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+
+.tree-node-row.is-selected .tree-node-label {
+  color: #fff;
+  font-weight: 600;
+}
+
+.tree-node-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex-shrink: 0;
+}
+
+.tree-action-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 20px;
+  border-radius: 3px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 11px;
+  cursor: pointer;
+  padding: 0;
+  transition: all 100ms ease;
+}
+
+.tree-action-btn:hover {
+  background: var(--bg-surface-3);
+  border-color: var(--border-default);
+  color: var(--text-primary);
+}
+
+.tree-action-btn.is-off {
+  color: var(--status-warning);
+  background: var(--status-warning-soft);
+}
+
+/* Visual 3D Orbit Pivot Point Indicator */
+.orbit-pivot-indicator {
+  position: absolute;
+  width: 24px;
+  height: 24px;
+  transform: translate(-50%, -50%);
+  pointer-events: none !important;
+  z-index: 14;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: opacity 200ms ease;
+}
+
+.orbit-pivot-indicator.hidden {
+  opacity: 0;
+  display: none;
+}
+
+.orbit-pivot-indicator .pivot-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #10b981;
+  box-shadow: 0 0 8px #10b981, 0 0 2px #fff;
+}
+
+.orbit-pivot-indicator .pivot-ring {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 1.5px solid hsla(199, 89%, 55%, 0.85);
+  box-shadow: 0 0 10px hsla(199, 89%, 48%, 0.45);
+}
+
+/* Floating Quick Action Bar (Bottom-Center Autodesk Viewer Style) */
+.floating-quick-bar {
+  position: absolute;
+  bottom: 58px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 16;
+  background: hsla(222, 34%, 9%, 0.92);
+  backdrop-filter: blur(10px);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  padding: 6px 10px;
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.68);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  pointer-events: auto;
+  max-width: 94%;
+}
+
+.floating-quick-bar.hidden {
+  display: none;
+}
+
+.quick-bar-selected-label {
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--accent-primary);
+  max-width: 480px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 0 6px;
+}
+
+.quick-bar-buttons {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+.quick-action-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 28px;
+  padding: 0 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-default);
+  background: var(--bg-surface-2);
+  color: var(--text-primary);
+  font-size: 11.5px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.quick-action-btn:hover {
+  background: var(--bg-surface-hover);
+  border-color: var(--accent-primary);
+}
+
+.quick-action-btn kbd {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: var(--bg-canvas);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-muted);
 }
 
 /* Responsive Adjustments */

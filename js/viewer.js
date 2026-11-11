@@ -1,18 +1,16 @@
 /**
  * ============================================================================
- * js/viewer.js — Autodesk Viewer v7 (GuiViewer3D) Controller
+ * js/viewer.js — Autodesk Viewer v7 + Precision CAD Navigation & Tree Engine
  * ============================================================================
  * Menangani:
- * 1. Inisialisasi Autodesk.Viewing.GuiViewer3D dalam mode Local/Offline maupun Cloud
- * 2. Load model .svf dari Virtual Service Worker URL (/local-svf/{modelId}/...)
- * 3. Load model lokal langsung (.IFC, .GLB, .GLTF, .OBJ, .STL, .NWDJSON)
- *    tanpa memerlukan Cloud / Kartu Kredit APS menggunakan SceneBuilder
- * 4. Load model langsung dari Cloud URN (urn:...)
- * 5. Generator Model 3D Demo Industrial Plant (SceneBuilder) untuk uji coba
- *    100% Offline instan
- * 6. Fitur CAD/BIM Navisworks: Search & Isolate, First-Person Walk (WASD),
- *    Measure, Section Box/Plane, Explode, Ghosting, Theme Switcher,
- *    dan Saved Viewpoints (localStorage).
+ * 1. Inisialisasi Autodesk.Viewing.GuiViewer3D (Mode Offline & Cloud)
+ * 2. Normalisasi Koordinat Georeferenced IFC/3D ke pusat (0,0,0) & Outlier Filtering
+ * 3. Precision CAD OrbitControls Engine (Orbit, Pan, Dynamic Fast Zoom zoomSpeed=2.5
+ *    yang mendorong target maju saat dekat objek sehingga tidak pernah macet/lambat)
+ * 4. Pemisahan tegas Single-Click (Pilih + Set Orbit Pivot TANPA Auto-Zoom),
+ *    Drag Orbit (>5px), dan Double-Click (Focus Zoom-to-Fit ke Part)
+ * 5. Selection Tree (Model Hierarchy) dengan Hide / Unhide (👁️), Isolate (⚡),
+ *    Focus Part (🎯), dan Show All (🔄).
  */
 
 import { normalizeSvfPath, getModelFile } from './storage.js';
@@ -24,7 +22,68 @@ let viewerInstance = null;
 let isInitializerDone = false;
 let currentLoadedModelId = null;
 let currentGhostingState = true;
-let customDemoMetadataMap = new Map(); // dbId -> object metadata untuk Demo & Local 3D Model
+let activeSelectionCallback = null;
+let activeHierarchyChangedCallback = null;
+
+/**
+ * Registry seluruh part/komponen 3D pada model yang sedang aktif:
+ * dbId -> {
+ *   dbId: number,
+ *   name: string,
+ *   category: string,
+ *   system: string,
+ *   material: string,
+ *   colorHex: number,
+ *   specs: Object,
+ *   bbox: THREE.Box3,
+ *   center: THREE.Vector3,
+ *   size: THREE.Vector3,
+ *   visible: boolean,
+ *   selected: boolean,
+ *   fragIds: number[],
+ *   meshes: THREE.Mesh[],
+ *   originalMaterial: THREE.Material,
+ *   highlightMaterial: THREE.Material
+ * }
+ */
+const partRegistry = new Map();
+const fragIdToDbIdMap = new Map();
+let selectedDbIdSet = new Set();
+let globalNormalizedBox = null;
+
+/**
+ * State Precision CAD OrbitControls (Standar Autodesk Viewer / Navisworks)
+ */
+const controlsState = {
+  attached: false,
+  enableRotate: true,
+  enablePan: true,
+  enableZoom: true,
+  enableDamping: true,
+  dampingFactor: 0.08,
+  rotateSpeed: 1.0,
+  panSpeed: 1.2,
+  zoomSpeed: 2.5,
+  screenSpacePanning: true,
+  minDistance: 0.1,
+  target: null, // THREE.Vector3 (Pivot putaran kamera)
+  modelMaxDim: 50,
+  // Pointer tracking untuk membedakan Single-Click vs Drag Orbit (>5px)
+  isPointerDown: false,
+  activeButton: -1,
+  downX: 0,
+  downY: 0,
+  lastX: 0,
+  lastY: 0,
+  dragDistance: 0,
+  mode: 'none', // 'orbit' | 'pan' | 'none'
+  // Damping velocity
+  velTheta: 0,
+  velPhi: 0,
+  dampingRafId: null,
+  transitionRafId: null,
+  pivotHideTimer: null
+};
 
 /**
  * Memastikan Autodesk.Viewing.Initializer sudah dijalankan (Mode Local / Offline-first).
@@ -46,7 +105,7 @@ function ensureViewingInitialized() {
     const options = {
       env: 'Local',
       useADP: false,
-      useConsolidation: true
+      useConsolidation: false
     };
 
     window.Autodesk.Viewing.Initializer(options, () => {
@@ -59,11 +118,15 @@ function ensureViewingInitialized() {
 /**
  * Menginisialisasi atau mengambil instance GuiViewer3D pada elemen #forgeViewer.
  * @param {HTMLElement} container
- * @param {(selectionInfo: {dbIds: number[], name: string, props?: Object}) => void} [onSelectionChanged]
+ * @param {(selectionInfo: Object) => void} [onSelectionChanged]
+ * @param {(treeData: Object) => void} [onHierarchyChanged]
  * @returns {Promise<any>}
  */
-export async function initViewer(container, onSelectionChanged) {
+export async function initViewer(container, onSelectionChanged, onHierarchyChanged) {
   await ensureViewingInitialized();
+
+  if (onSelectionChanged) activeSelectionCallback = onSelectionChanged;
+  if (onHierarchyChanged) activeHierarchyChangedCallback = onHierarchyChanged;
 
   if (viewerInstance && viewerInstance.started) {
     return viewerInstance;
@@ -85,63 +148,955 @@ export async function initViewer(container, onSelectionChanged) {
     throw new Error('Gagal menginisialisasi WebGL Canvas untuk Autodesk GuiViewer3D.');
   }
 
+  // Matikan perilaku auto-zoom bawaan LMV saat klik objek
+  try {
+    if (typeof viewerInstance.setClickToSetCOI === 'function') {
+      viewerInstance.setClickToSetCOI(false, false);
+    }
+    if (typeof viewerInstance.setClickConfig === 'function') {
+      viewerInstance.setClickConfig('click', 'onObject', ['selectOnly']);
+      viewerInstance.setClickConfig('click', 'offObject', ['deselectAll']);
+    }
+  } catch {
+    // Abaikan jika metode tidak tersedia
+  }
+
   // Konfigurasi default tampilan ala Navisworks Dark CAD Studio
   applyViewerTheme('dark');
   viewerInstance.setGhosting(true);
   viewerInstance.setQualityLevel(true, true);
-  viewerInstance.setGroundShadow(true);
+  viewerInstance.setGroundShadow(false);
   viewerInstance.setGroundReflection(false);
   viewerInstance.setEnvMapBackground(false);
 
-  // Event Listener saat objek 3D diklik / dipilih
-  const Av = window.Autodesk.Viewing;
-  viewerInstance.addEventListener(Av.SELECTION_CHANGED_EVENT, (event) => {
-    const dbIds = event.dbIdArray || [];
-    if (!onSelectionChanged) return;
+  const THREE = window.THREE;
+  controlsState.target = new THREE.Vector3(0, 0, 0);
 
-    if (dbIds.length === 0) {
-      onSelectionChanged({ dbIds: [], name: 'Tidak ada objek dipilih' });
-      return;
-    }
-
-    const primaryDbId = dbIds[0];
-
-    // Cek apakah objek berasal dari Local 3D / Demo Model dengan metadata BIM khusus
-    if (customDemoMetadataMap.has(primaryDbId)) {
-      const meta = customDemoMetadataMap.get(primaryDbId);
-      onSelectionChanged({
-        dbIds,
-        name: `${meta.name} [dbId: ${primaryDbId}]`,
-        props: meta
-      });
-      return;
-    }
-
-    // Ambil nama dari InstanceTree / getProperties untuk SVF asli
-    const tree = viewerInstance.model?.getInstanceTree?.();
-    const nodeName = tree ? tree.getNodeName(primaryDbId) : `Element #${primaryDbId}`;
-
-    viewerInstance.getProperties(
-      primaryDbId,
-      (propResult) => {
-        onSelectionChanged({
-          dbIds,
-          name: `${propResult?.name || nodeName} ${
-            dbIds.length > 1 ? `(+${dbIds.length - 1} lainnya)` : `[dbId: ${primaryDbId}]`
-          }`,
-          props: propResult
-        });
-      },
-      () => {
-        onSelectionChanged({
-          dbIds,
-          name: `${nodeName} [dbId: ${primaryDbId}]`
-        });
-      }
-    );
-  });
+  // Pasang Precision CAD Orbit/Pan/Zoom & Click Controller
+  attachPrecisionCadControls(container);
 
   return viewerInstance;
+}
+
+/**
+ * Mengecek apakah user sedang mengaktifkan tool khusus (BimWalk, Measure, Section)
+ * sehingga event mouse harus diteruskan ke tool tersebut.
+ */
+function isSpecialViewerToolActive() {
+  if (!viewerInstance) return false;
+  try {
+    const walkExt = viewerInstance.getExtension('Autodesk.BimWalk');
+    if (walkExt && walkExt.isActive && walkExt.isActive()) return true;
+
+    const measureExt = viewerInstance.getExtension('Autodesk.Measure');
+    if (measureExt && measureExt.isActive && measureExt.isActive()) return true;
+
+    const sectionExt = viewerInstance.getExtension('Autodesk.Section');
+    if (sectionExt && sectionExt.isActive && sectionExt.isActive()) return true;
+  } catch {
+    // Abaikan
+  }
+  return false;
+}
+
+/**
+ * Menampilkan indikator visual titik Pivot Orbit (hijau/biru) di layar 3D.
+ * @param {THREE.Vector3} worldPoint
+ * @param {number} [durationMs=900]
+ */
+function showOrbitPivotIndicator(worldPoint, durationMs = 900) {
+  const indicator = document.getElementById('orbitPivotIndicator');
+  if (!indicator || !viewerInstance || !worldPoint) return;
+
+  try {
+    const cam = viewerInstance.impl?.camera;
+    const canvas = viewerInstance.canvas || viewerInstance.impl?.canvas;
+    if (!cam || !canvas) return;
+
+    const projected = worldPoint.clone().project(cam);
+    if (projected.z < -1 || projected.z > 1) {
+      indicator.classList.add('hidden');
+      return;
+    }
+
+    const rect = canvas.getBoundingClientRect();
+    const screenX = (projected.x * 0.5 + 0.5) * rect.width;
+    const screenY = (-projected.y * 0.5 + 0.5) * rect.height;
+
+    indicator.style.left = `${screenX}px`;
+    indicator.style.top = `${screenY}px`;
+    indicator.classList.remove('hidden');
+
+    if (controlsState.pivotHideTimer) {
+      clearTimeout(controlsState.pivotHideTimer);
+    }
+    if (durationMs > 0) {
+      controlsState.pivotHideTimer = setTimeout(() => {
+        indicator.classList.add('hidden');
+      }, durationMs);
+    }
+  } catch {
+    // Abaikan
+  }
+}
+
+/**
+ * Menyinkronkan posisi kamera, target (pivot), up vector, dan near/far clipping plane
+ * langsung ke WebGL Renderer Autodesk Viewer.
+ */
+function syncCameraStateToViewer(newPos, newTarget, customUp = null) {
+  if (!viewerInstance || !viewerInstance.impl) return;
+  const THREE = window.THREE;
+  const cam = viewerInstance.impl.camera;
+  if (!cam) return;
+
+  const upVec = customUp || new THREE.Vector3(0, 1, 0);
+
+  if (newTarget) {
+    controlsState.target.copy(newTarget);
+  }
+
+  const dist = Math.max(0.01, newPos.distanceTo(controlsState.target));
+  const maxDim = Math.max(10, controlsState.modelMaxDim || 50);
+
+  // Dynamic Clipping Plane agar model besar tidak terpotong & zoom dekat tidak near-clip
+  cam.near = Math.max(0.01, Math.min(dist * 0.02, maxDim / 1000));
+  cam.far = Math.max(10000, maxDim * 100, dist * 20);
+
+  cam.position.copy(newPos);
+  if (cam.target) cam.target.copy(controlsState.target);
+  cam.up.copy(upVec);
+  cam.lookAt(controlsState.target);
+  cam.dirty = true;
+  if (typeof cam.updateProjectionMatrix === 'function') {
+    cam.updateProjectionMatrix();
+  }
+  if (typeof cam.updateMatrixWorld === 'function') {
+    cam.updateMatrixWorld(true);
+  }
+
+  try {
+    if (viewerInstance.navigation) {
+      viewerInstance.navigation.setView(newPos, controlsState.target);
+      viewerInstance.navigation.setPivotPoint(controlsState.target);
+      viewerInstance.navigation.setCameraUpVector(upVec);
+    }
+  } catch {
+    // Abaikan
+  }
+
+  viewerInstance.impl.invalidate(true, true, true);
+}
+
+/**
+ * Mengaplikasikan rotasi bola (Spherical Orbit) di sekitar `controlsState.target`.
+ * @param {number} deltaTheta - Putaran horizontal (radian)
+ * @param {number} deltaPhi - Putaran vertikal (radian)
+ */
+function applySphericalOrbitDelta(deltaTheta, deltaPhi) {
+  if (!viewerInstance || !viewerInstance.impl?.camera) return;
+  const THREE = window.THREE;
+  const cam = viewerInstance.impl.camera;
+
+  const offset = cam.position.clone().sub(controlsState.target);
+  let radius = offset.length();
+  if (!Number.isFinite(radius) || radius < controlsState.minDistance) {
+    radius = Math.max(2.0, controlsState.modelMaxDim * 0.25);
+    offset.set(radius, radius * 0.7, radius);
+  }
+
+  // Konversi ke koordinat bola dengan sumbu Y sebagai vertikal (Y-up)
+  let theta = Math.atan2(offset.x, offset.z);
+  let phi = Math.acos(Math.max(-1, Math.min(1, offset.y / radius)));
+
+  theta += deltaTheta;
+  phi = Math.max(0.02, Math.min(Math.PI - 0.02, phi + deltaPhi));
+
+  const sinPhiRadius = Math.sin(phi) * radius;
+  offset.x = sinPhiRadius * Math.sin(theta);
+  offset.y = Math.cos(phi) * radius;
+  offset.z = sinPhiRadius * Math.cos(theta);
+
+  const newPos = controlsState.target.clone().add(offset);
+  syncCameraStateToViewer(newPos, controlsState.target, new THREE.Vector3(0, 1, 0));
+}
+
+/**
+ * Mengaplikasikan pergeseran kamera (Screen-Space Pan).
+ * @param {number} dxPixels
+ * @param {number} dyPixels
+ * @param {HTMLElement} domEl
+ */
+function applyScreenSpacePanDelta(dxPixels, dyPixels, domEl) {
+  if (!viewerInstance || !viewerInstance.impl?.camera) return;
+  const THREE = window.THREE;
+  const cam = viewerInstance.impl.camera;
+
+  const offset = cam.position.clone().sub(controlsState.target);
+  const targetDistance = Math.max(offset.length(), controlsState.modelMaxDim * 0.04, 0.5);
+  const fovRad = ((cam.fov || 45) * Math.PI) / 180;
+  const viewHeight = 2 * Math.tan(fovRad / 2) * targetDistance;
+
+  const clientH = Math.max(1, domEl.clientHeight || 600);
+  const panScale = (viewHeight / clientH) * controlsState.panSpeed;
+
+  const forward = controlsState.target.clone().sub(cam.position).normalize();
+  const worldUp = new THREE.Vector3(0, 1, 0);
+  const right = new THREE.Vector3().crossVectors(forward, worldUp);
+  if (right.lengthSq() < 0.0001) {
+    right.set(1, 0, 0);
+  } else {
+    right.normalize();
+  }
+  const cameraUp = new THREE.Vector3().crossVectors(right, forward).normalize();
+
+  const panOffset = new THREE.Vector3()
+    .addScaledVector(right, -dxPixels * panScale)
+    .addScaledVector(cameraUp, dyPixels * panScale);
+
+  const newPos = cam.position.clone().add(panOffset);
+  const newTarget = controlsState.target.clone().add(panOffset);
+  syncCameraStateToViewer(newPos, newTarget, worldUp);
+}
+
+/**
+ * Mengaplikasikan animasi transisi kamera yang mulus (cubic ease-out).
+ */
+function animateCameraTransition(targetPos, targetCenter, durationMs = 260) {
+  if (!viewerInstance || !viewerInstance.impl?.camera) return;
+  if (controlsState.transitionRafId) {
+    cancelAnimationFrame(controlsState.transitionRafId);
+    controlsState.transitionRafId = null;
+  }
+  if (controlsState.dampingRafId) {
+    cancelAnimationFrame(controlsState.dampingRafId);
+    controlsState.dampingRafId = null;
+  }
+
+  const cam = viewerInstance.impl.camera;
+  const startPos = cam.position.clone();
+  const startTarget = controlsState.target.clone();
+  const endPos = targetPos.clone();
+  const endTarget = targetCenter.clone();
+
+  if (durationMs <= 0) {
+    syncCameraStateToViewer(endPos, endTarget);
+    return;
+  }
+
+  const startTime = performance.now();
+  const step = (now) => {
+    const elapsed = now - startTime;
+    const t = Math.min(1, elapsed / durationMs);
+    const ease = 1 - Math.pow(1 - t, 3); // Cubic ease-out
+
+    const curPos = startPos.clone().lerp(endPos, ease);
+    const curTarget = startTarget.clone().lerp(endTarget, ease);
+    syncCameraStateToViewer(curPos, curTarget);
+
+    if (t < 1) {
+      controlsState.transitionRafId = requestAnimationFrame(step);
+    } else {
+      controlsState.transitionRafId = null;
+    }
+  };
+
+  controlsState.transitionRafId = requestAnimationFrame(step);
+}
+
+/**
+ * Memasang Precision CAD OrbitControls (Orbit, Pan, Dynamic Fast Zoom, Single-Click vs Drag, Double-Click)
+ * langsung pada elemen container/canvas 3D Viewer.
+ */
+function attachPrecisionCadControls(container) {
+  if (controlsState.attached) return;
+  controlsState.attached = true;
+
+  const stopOngoingAnimations = () => {
+    if (controlsState.transitionRafId) {
+      cancelAnimationFrame(controlsState.transitionRafId);
+      controlsState.transitionRafId = null;
+    }
+    if (controlsState.dampingRafId) {
+      cancelAnimationFrame(controlsState.dampingRafId);
+      controlsState.dampingRafId = null;
+    }
+  };
+
+  // Cek apakah target klik berada di atas toolbar/panel mengambang milik Autodesk Viewer
+  const isEventOnUiOverlay = (e) => {
+    const t = e.target;
+    if (!t || !(t instanceof HTMLElement)) return false;
+    if (t.tagName === 'CANVAS') return false;
+    if (
+      t.closest('.adsk-control') ||
+      t.closest('.docking-panel') ||
+      t.closest('.floating-quick-bar') ||
+      t.closest('.walk-hud-banner') ||
+      t.closest('.viewer-empty-overlay') ||
+      t.closest('button') ||
+      t.closest('input')
+    ) {
+      return true;
+    }
+    return false;
+  };
+
+  // 1. POINTER DOWN
+  container.addEventListener(
+    'pointerdown',
+    (e) => {
+      if (isEventOnUiOverlay(e) || isSpecialViewerToolActive()) return;
+
+      stopOngoingAnimations();
+      controlsState.isPointerDown = true;
+      controlsState.activeButton = e.button;
+      controlsState.downX = e.clientX;
+      controlsState.downY = e.clientY;
+      controlsState.lastX = e.clientX;
+      controlsState.lastY = e.clientY;
+      controlsState.dragDistance = 0;
+      controlsState.velTheta = 0;
+      controlsState.velPhi = 0;
+
+      // Mapping tombol mouse standar Autodesk Viewer / Navisworks:
+      // - Klik Kiri (button 0) tanpa Shift -> Orbit (ROTATE)
+      // - Klik Tengah (button 1), Klik Kanan (button 2), atau Shift + Klik Kiri -> Pan (PAN)
+      if (e.button === 0 && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
+        controlsState.mode = controlsState.enableRotate ? 'orbit' : 'none';
+      } else if (e.button === 1 || e.button === 2 || (e.button === 0 && e.shiftKey)) {
+        controlsState.mode = controlsState.enablePan ? 'pan' : 'none';
+      } else {
+        controlsState.mode = 'none';
+      }
+
+      try {
+        if (e.target && e.target.setPointerCapture) {
+          e.target.setPointerCapture(e.pointerId);
+        }
+      } catch {
+        // Abaikan
+      }
+
+      e.stopImmediatePropagation();
+    },
+    { capture: true }
+  );
+
+  // 2. POINTER MOVE (Orbit / Pan)
+  container.addEventListener(
+    'pointermove',
+    (e) => {
+      if (!controlsState.isPointerDown) return;
+      if (isSpecialViewerToolActive()) return;
+
+      const dx = e.clientX - controlsState.lastX;
+      const dy = e.clientY - controlsState.lastY;
+      controlsState.lastX = e.clientX;
+      controlsState.lastY = e.clientY;
+
+      controlsState.dragDistance = Math.hypot(
+        e.clientX - controlsState.downX,
+        e.clientY - controlsState.downY
+      );
+
+      const width = Math.max(1, container.clientWidth || 800);
+      const height = Math.max(1, container.clientHeight || 600);
+
+      if (controlsState.mode === 'orbit' && controlsState.enableRotate) {
+        const dTheta = -(dx / width) * Math.PI * 2.1 * controlsState.rotateSpeed;
+        const dPhi = -(dy / height) * Math.PI * 1.8 * controlsState.rotateSpeed;
+        controlsState.velTheta = dTheta;
+        controlsState.velPhi = dPhi;
+        applySphericalOrbitDelta(dTheta, dPhi);
+        showOrbitPivotIndicator(controlsState.target, 500);
+      } else if (controlsState.mode === 'pan' && controlsState.enablePan) {
+        applyScreenSpacePanDelta(dx, dy, container);
+        showOrbitPivotIndicator(controlsState.target, 500);
+      }
+
+      e.stopImmediatePropagation();
+      e.preventDefault();
+    },
+    { capture: true }
+  );
+
+  // 3. POINTER UP (Pisahkan Drag Orbit >5px vs Single-Click Seleksi <=5px)
+  container.addEventListener(
+    'pointerup',
+    (e) => {
+      if (!controlsState.isPointerDown) return;
+      if (isSpecialViewerToolActive()) return;
+
+      try {
+        if (e.target && e.target.releasePointerCapture) {
+          e.target.releasePointerCapture(e.pointerId);
+        }
+      } catch {
+        // Abaikan
+      }
+
+      const totalDragDist = Math.hypot(
+        e.clientX - controlsState.downX,
+        e.clientY - controlsState.downY
+      );
+      const wasLeftClick = controlsState.activeButton === 0 && !e.shiftKey;
+      const prevMode = controlsState.mode;
+
+      controlsState.isPointerDown = false;
+      controlsState.activeButton = -1;
+      controlsState.mode = 'none';
+
+      e.stopImmediatePropagation();
+
+      // Jika geseran > 5px, ini adalah gerakan Orbit / Pan, BUKAN klik seleksi!
+      if (totalDragDist > 5) {
+        if (
+          prevMode === 'orbit' &&
+          controlsState.enableDamping &&
+          (Math.abs(controlsState.velTheta) > 0.0005 || Math.abs(controlsState.velPhi) > 0.0005)
+        ) {
+          const runInertia = () => {
+            controlsState.velTheta *= 1 - controlsState.dampingFactor * 2.2;
+            controlsState.velPhi *= 1 - controlsState.dampingFactor * 2.2;
+            if (
+              Math.abs(controlsState.velTheta) > 0.00025 ||
+              Math.abs(controlsState.velPhi) > 0.00025
+            ) {
+              applySphericalOrbitDelta(controlsState.velTheta, controlsState.velPhi);
+              controlsState.dampingRafId = requestAnimationFrame(runInertia);
+            } else {
+              controlsState.dampingRafId = null;
+            }
+          };
+          controlsState.dampingRafId = requestAnimationFrame(runInertia);
+        }
+        return;
+      }
+
+      // Jika geseran <= 5px dan Klik Kiri: Lakukan Single-Click Part Selection (TANPA Auto-Zoom!)
+      if (wasLeftClick) {
+        handleCanvasSingleClick(e.clientX, e.clientY, container);
+      }
+    },
+    { capture: true }
+  );
+
+  // Blokir event 'click' bawaan LMV di atas canvas agar tidak terjadi double-trigger/auto-zoom
+  container.addEventListener(
+    'click',
+    (e) => {
+      if (isEventOnUiOverlay(e) || isSpecialViewerToolActive()) return;
+      e.stopImmediatePropagation();
+    },
+    { capture: true }
+  );
+
+  // 4. DOUBLE CLICK (Focus & Zoom-to-Fit ke Part yang diklik 2x)
+  container.addEventListener(
+    'dblclick',
+    (e) => {
+      if (isEventOnUiOverlay(e) || isSpecialViewerToolActive()) return;
+      e.stopImmediatePropagation();
+      e.preventDefault();
+
+      const hit = pickPartAtScreenCoords(e.clientX, e.clientY, container);
+      if (hit && hit.dbId) {
+        selectPartById(hit.dbId, {
+          setPivot: true,
+          zoomToFit: true,
+          customPivotPoint: hit.point
+        });
+      } else {
+        // Double click di ruang kosong -> Fit All
+        fitToViewAll();
+      }
+    },
+    { capture: true }
+  );
+
+  // 5. MOUSE WHEEL (Autodesk-Style Dynamic Fast Zoom — zoomSpeed = 2.5 & Anti-Macet)
+  container.addEventListener(
+    'wheel',
+    (e) => {
+      if (isEventOnUiOverlay(e) || isSpecialViewerToolActive() || !controlsState.enableZoom) return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+
+      stopOngoingAnimations();
+
+      if (!viewerInstance || !viewerInstance.impl?.camera) return;
+      const THREE = window.THREE;
+      const cam = viewerInstance.impl.camera;
+
+      // Normalisasi delta scroll mouse / trackpad
+      let rawDelta = e.deltaY;
+      if (e.deltaMode === 1) rawDelta *= 32; // DOM_DELTA_LINE
+      else if (e.deltaMode === 2) rawDelta *= 300; // DOM_DELTA_PAGE
+
+      const clampedDelta = Math.max(-160, Math.min(160, rawDelta));
+      const zoomIn = clampedDelta < 0;
+      const intensity = Math.max(0.15, Math.min(1.6, Math.abs(clampedDelta) / 90));
+
+      // Hitung arah ray menuju posisi kursor mouse di layar agar zoom mengarah ke kursor
+      const rect = container.getBoundingClientRect();
+      const ndcX = ((e.clientX - rect.left) / Math.max(1, rect.width)) * 2 - 1;
+      const ndcY = -((e.clientY - rect.top) / Math.max(1, rect.height)) * 2 + 1;
+
+      const cursorWorldDir = new THREE.Vector3(ndcX, ndcY, 0.5)
+        .unproject(cam)
+        .sub(cam.position)
+        .normalize();
+
+      const forwardToTarget = controlsState.target.clone().sub(cam.position);
+      const currentDist = Math.max(0.05, forwardToTarget.length());
+      const forwardDir =
+        forwardToTarget.lengthSq() > 0.00001
+          ? forwardToTarget.clone().normalize()
+          : cursorWorldDir.clone();
+
+      // Kecepatan zoom tinggi (zoomSpeed = 2.5 -> ~28% jarak per takik scroll)
+      const stepFraction = Math.min(0.48, 0.12 * controlsState.zoomSpeed * intensity);
+      const minStepDistance = Math.max(0.2, controlsState.modelMaxDim * 0.018 * intensity);
+
+      if (zoomIn) {
+        const proportionalMove = currentDist * stepFraction;
+        const moveDist = Math.max(proportionalMove, minStepDistance);
+
+        // Arah gerak menggabungkan arah target (70%) + arah kursor mouse (30%)
+        const zoomDir = forwardDir.clone().lerp(cursorWorldDir, 0.3).normalize();
+        const newPos = cam.position.clone().addScaledVector(zoomDir, moveDist);
+
+        // KUNCI ANTI-MACET: Jika kamera mulai mendekati target (atau langkah proporsional < minStep),
+        // dorong juga `controlsState.target` maju searah pandangan kamera!
+        let newTarget = controlsState.target.clone();
+        const remainingDist = currentDist - moveDist;
+        const comfortableMinPivotDist = Math.max(
+          controlsState.minDistance,
+          controlsState.modelMaxDim * 0.03
+        );
+
+        if (remainingDist < comfortableMinPivotDist || proportionalMove < minStepDistance) {
+          const pushDist = Math.max(0, comfortableMinPivotDist - remainingDist) + moveDist * 0.35;
+          newTarget.addScaledVector(zoomDir, pushDist);
+        }
+
+        syncCameraStateToViewer(newPos, newTarget);
+      } else {
+        // Zoom Out
+        const proportionalMove = currentDist * (stepFraction * 1.15);
+        const moveDist = Math.max(proportionalMove, minStepDistance);
+        const newPos = cam.position.clone().addScaledVector(forwardDir, -moveDist);
+        syncCameraStateToViewer(newPos, controlsState.target);
+      }
+
+      showOrbitPivotIndicator(controlsState.target, 450);
+    },
+    { capture: true, passive: false }
+  );
+
+  // Matikan context menu bawaan browser saat Right-Click Drag Pan
+  container.addEventListener('contextmenu', (e) => {
+    if (!isEventOnUiOverlay(e)) {
+      e.preventDefault();
+    }
+  });
+}
+
+/**
+ * Melakukan Raycasting 3D presisi tinggi pada koordinat layar (clientX, clientY).
+ * Mendukung model SceneBuilder (.IFC, .GLB, .OBJ, .STL, .NWDJSON, Demo) maupun .SVF.
+ * @param {number} clientX
+ * @param {number} clientY
+ * @param {HTMLElement} container
+ * @returns {{dbId: number, point: THREE.Vector3} | null}
+ */
+function pickPartAtScreenCoords(clientX, clientY, container) {
+  if (!viewerInstance || !viewerInstance.impl?.camera) return null;
+  const THREE = window.THREE;
+  const cam = viewerInstance.impl.camera;
+  const rect = container.getBoundingClientRect();
+
+  const canvasX = clientX - rect.left;
+  const canvasY = clientY - rect.top;
+
+  // 1. Jika partRegistry memiliki mesh Three.js langsung (SceneBuilder: .IFC, .GLB, .OBJ, .STL, .NWDJSON, Demo)
+  // Gunakan Raycaster Three.js dengan fast BoundingBox culling agar 100% akurat ke segitiga yang terlihat
+  if (partRegistry.size > 0) {
+    const ndcX = (canvasX / Math.max(1, rect.width)) * 2 - 1;
+    const ndcY = -(canvasY / Math.max(1, rect.height)) * 2 + 1;
+
+    const raycaster = new THREE.Raycaster();
+    const rayOrigin = cam.position.clone();
+    const rayTarget = new THREE.Vector3(ndcX, ndcY, 0.5).unproject(cam);
+    const rayDir = rayTarget.sub(rayOrigin).normalize();
+    raycaster.ray.set(rayOrigin, rayDir);
+
+    let closestDist = Infinity;
+    let bestHit = null;
+    const tmpBoxDist = new THREE.Vector3();
+
+    // Tahap A: Filter kandidat part yang visible === true dan bounding box-nya tertembus ray
+    const candidates = [];
+    for (const part of partRegistry.values()) {
+      if (!part.visible || !part.bbox || part.bbox.isEmpty()) continue;
+      const boxHitPoint = raycaster.ray.intersectBox(part.bbox, tmpBoxDist);
+      if (boxHitPoint) {
+        const boxDist = rayOrigin.distanceTo(boxHitPoint);
+        candidates.push({ part, boxDist });
+      }
+    }
+
+    // Urutkan kandidat dari yang paling dekat dengan kamera
+    candidates.sort((a, b) => a.boxDist - b.boxDist);
+
+    const vA = new THREE.Vector3();
+    const vB = new THREE.Vector3();
+    const vC = new THREE.Vector3();
+    const intersectPt = new THREE.Vector3();
+
+    for (const { part, boxDist } of candidates) {
+      if (boxDist > closestDist) break; // Early exit jika kotak sudah lebih jauh dari hit segitiga terdekat
+
+      if (part.meshes && part.meshes.length > 0) {
+        for (const mesh of part.meshes) {
+          const geom = mesh.geometry;
+          const posAttr = geom?.attributes?.position;
+          if (!posAttr || !posAttr.array) {
+            // Fallback ke pusat bbox jika buffer sudah dikonsolidasi
+            const centerDist = rayOrigin.distanceTo(part.center);
+            if (centerDist < closestDist) {
+              closestDist = centerDist;
+              bestHit = { dbId: part.dbId, point: boxDist > 0 ? rayOrigin.clone().addScaledVector(rayDir, boxDist) : part.center.clone() };
+            }
+            continue;
+          }
+
+          const arr = posAttr.array;
+          for (let i = 0; i <= arr.length - 9; i += 9) {
+            vA.set(arr[i], arr[i + 1], arr[i + 2]);
+            vB.set(arr[i + 3], arr[i + 4], arr[i + 5]);
+            vC.set(arr[i + 6], arr[i + 7], arr[i + 8]);
+
+            if (mesh.matrixWorld && !mesh.PositionIsWorld) {
+              vA.applyMatrix4(mesh.matrixWorld);
+              vB.applyMatrix4(mesh.matrixWorld);
+              vC.applyMatrix4(mesh.matrixWorld);
+            }
+
+            const hitPt = raycaster.ray.intersectTriangle(vA, vB, vC, false, intersectPt);
+            if (hitPt) {
+              const d = rayOrigin.distanceTo(hitPt);
+              if (d < closestDist) {
+                closestDist = d;
+                bestHit = { dbId: part.dbId, point: hitPt.clone() };
+              }
+            }
+          }
+        }
+      } else {
+        // Kandidat SVF di dalam partRegistry
+        const hitPt = rayOrigin.clone().addScaledVector(rayDir, boxDist);
+        if (boxDist < closestDist) {
+          closestDist = boxDist;
+          bestHit = { dbId: part.dbId, point: hitPt };
+        }
+      }
+    }
+
+    if (bestHit) return bestHit;
+  }
+
+  // 2. Fallback ke hitTest bawaan LMV (untuk model SVF native)
+  try {
+    const lmvHit = viewerInstance.impl.hitTest(canvasX, canvasY, false);
+    if (lmvHit) {
+      let resolvedDbId = lmvHit.dbId;
+      if (lmvHit.fragId !== undefined && fragIdToDbIdMap.has(lmvHit.fragId)) {
+        resolvedDbId = fragIdToDbIdMap.get(lmvHit.fragId);
+      }
+      if (resolvedDbId) {
+        return {
+          dbId: resolvedDbId,
+          point: lmvHit.intersectPoint
+            ? new THREE.Vector3(lmvHit.intersectPoint.x, lmvHit.intersectPoint.y, lmvHit.intersectPoint.z)
+            : partRegistry.get(resolvedDbId)?.center?.clone() || new THREE.Vector3()
+        };
+      }
+    }
+  } catch {
+    // Abaikan
+  }
+
+  return null;
+}
+
+/**
+ * Handler saat user melakukan Single-Click (geseran <= 5px) di kanvas 3D:
+ * - JANGAN melakukan auto-zoom!
+ * - Cukup seleksi & highlight part tersebut
+ * - Set titik pusat putaran (Orbit Pivot / controlsState.target) ke part tersebut
+ * - Sinkronkan dengan Selection Tree & panel Properties.
+ */
+function handleCanvasSingleClick(clientX, clientY, container) {
+  const hit = pickPartAtScreenCoords(clientX, clientY, container);
+  if (!hit || !hit.dbId) {
+    clearPartSelection();
+    return;
+  }
+
+  selectPartById(hit.dbId, {
+    setPivot: true,
+    zoomToFit: false,
+    customPivotPoint: hit.point
+  });
+}
+
+/**
+ * Mengatur highlight visual (warna biru terang ala Autodesk Viewer) pada part yang dipilih,
+ * dan mengembalikan material asli pada part yang tidak dipilih.
+ * @param {number[]} dbIds
+ */
+function applyVisualSelectionHighlight(dbIds) {
+  const nextSet = new Set(dbIds.map((id) => Number(id)));
+
+  // 1. Kembalikan material asli untuk part yang sebelumnya dipilih
+  for (const prevId of selectedDbIdSet) {
+    if (!nextSet.has(prevId)) {
+      const prevPart = partRegistry.get(prevId);
+      if (prevPart) {
+        prevPart.selected = false;
+        restorePartOriginalMaterial(prevPart);
+      }
+    }
+  }
+
+  // 2. Terapkan material highlight biru terang pada part yang baru dipilih
+  for (const nextId of nextSet) {
+    const part = partRegistry.get(nextId);
+    if (part) {
+      part.selected = true;
+      applyPartHighlightMaterial(part);
+    }
+  }
+
+  selectedDbIdSet = nextSet;
+
+  if (viewerInstance && viewerInstance.impl) {
+    viewerInstance.impl.invalidate(true, true, true);
+  }
+}
+
+function applyPartHighlightMaterial(part) {
+  if (!part || !viewerInstance) return;
+  const THREE = window.THREE;
+
+  if (!part.highlightMaterial) {
+    part.highlightMaterial = new THREE.MeshPhongMaterial({
+      color: new THREE.Color(0x00d8ff),
+      emissive: new THREE.Color(0x004e66),
+      specular: new THREE.Color(0xffffff),
+      shininess: 75,
+      side: THREE.DoubleSide
+    });
+    if (part.modelBuilder) {
+      part.modelBuilder.addMaterial(`mat_hl_${part.dbId}`, part.highlightMaterial);
+    }
+  }
+
+  const fragList = viewerInstance.model?.getFragmentList?.();
+  if (fragList && part.fragIds) {
+    for (const fragId of part.fragIds) {
+      try {
+        fragList.setMaterial(fragId, part.highlightMaterial);
+      } catch {
+        // Abaikan
+      }
+    }
+  }
+  if (part.meshes) {
+    for (const m of part.meshes) {
+      m.material = part.highlightMaterial;
+    }
+  }
+}
+
+function restorePartOriginalMaterial(part) {
+  if (!part || !viewerInstance) return;
+  if (!part.originalMaterial) return;
+
+  const fragList = viewerInstance.model?.getFragmentList?.();
+  if (fragList && part.fragIds) {
+    for (const fragId of part.fragIds) {
+      try {
+        fragList.setMaterial(fragId, part.originalMaterial);
+      } catch {
+        // Abaikan
+      }
+    }
+  }
+  if (part.meshes) {
+    for (const m of part.meshes) {
+      m.material = part.originalMaterial;
+    }
+  }
+}
+
+/**
+ * Menyeleksi sebuah part berdasarkan `dbId` (baik dari klik 3D maupun klik di Selection Tree).
+ * @param {number} dbId
+ * @param {{setPivot?: boolean, zoomToFit?: boolean, customPivotPoint?: THREE.Vector3}} [options]
+ */
+export function selectPartById(dbId, options = {}) {
+  const numId = Number(dbId);
+  const { setPivot = true, zoomToFit = false, customPivotPoint = null } = options;
+
+  const part = partRegistry.get(numId);
+  applyVisualSelectionHighlight([numId]);
+
+  if (zoomToFit) {
+    focusOnDbIds([numId]);
+  } else if (setPivot && viewerInstance && viewerInstance.impl?.camera) {
+    // PENTING: Hanya ubah pivot/target putaran ke part tersebut TANPA mengubah jarak zoom!
+    const pivotPt = customPivotPoint || part?.center;
+    if (pivotPt) {
+      controlsState.target.copy(pivotPt);
+      try {
+        viewerInstance.navigation?.setPivotPoint?.(pivotPt);
+      } catch {
+        // Abaikan
+      }
+      showOrbitPivotIndicator(pivotPt, 1100);
+      viewerInstance.impl.invalidate(false, false, true);
+    }
+  }
+
+  notifySelectionChanged([numId]);
+}
+
+/**
+ * Menghapus seleksi part saat ini dan mengembalikan warna asli.
+ */
+export function clearPartSelection() {
+  applyVisualSelectionHighlight([]);
+  try {
+    viewerInstance?.clearSelection?.();
+  } catch {
+    // Abaikan
+  }
+  notifySelectionChanged([]);
+}
+
+function notifySelectionChanged(dbIds) {
+  if (!activeSelectionCallback) return;
+
+  if (!dbIds || dbIds.length === 0) {
+    activeSelectionCallback({
+      dbIds: [],
+      name: 'Tidak ada objek dipilih',
+      props: null
+    });
+    return;
+  }
+
+  const primaryId = Number(dbIds[0]);
+  const part = partRegistry.get(primaryId);
+
+  if (part) {
+    activeSelectionCallback({
+      dbIds,
+      primaryDbId: primaryId,
+      name: `${part.name}`,
+      visible: part.visible,
+      props: {
+        dbId: part.dbId,
+        name: part.name,
+        category: part.category,
+        system: part.system,
+        material: part.material,
+        specs: part.specs
+      }
+    });
+    return;
+  }
+
+  // Fallback untuk SVF native
+  const tree = viewerInstance?.model?.getInstanceTree?.();
+  const nodeName = tree ? tree.getNodeName(primaryId) : `Element #${primaryId}`;
+  viewerInstance?.getProperties?.(
+    primaryId,
+    (propResult) => {
+      activeSelectionCallback({
+        dbIds,
+        primaryDbId: primaryId,
+        name: propResult?.name || nodeName,
+        visible: true,
+        props: propResult
+      });
+    },
+    () => {
+      activeSelectionCallback({
+        dbIds,
+        primaryDbId: primaryId,
+        name: nodeName,
+        visible: true
+      });
+    }
+  );
+}
+
+function notifyHierarchyChanged() {
+  if (activeHierarchyChangedCallback) {
+    activeHierarchyChangedCallback(getModelHierarchyTree());
+  }
+}
+
+/**
+ * Mengembalikan struktur hirarki Selection Tree (Kategori -> Daftar Part)
+ * untuk ditampilkan di Sidebar Kiri.
+ */
+export function getModelHierarchyTree() {
+  const categoryMap = new Map();
+  let totalCount = 0;
+  let visibleCount = 0;
+
+  for (const part of partRegistry.values()) {
+    totalCount++;
+    if (part.visible) visibleCount++;
+
+    const catName = part.category || 'Uncategorized Elements';
+    if (!categoryMap.has(catName)) {
+      categoryMap.set(catName, []);
+    }
+    categoryMap.get(catName).push({
+      dbId: part.dbId,
+      name: part.name,
+      category: catName,
+      visible: part.visible,
+      selected: selectedDbIdSet.has(part.dbId)
+    });
+  }
+
+  const categories = Array.from(categoryMap.entries())
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([category, parts]) => {
+      const allVisible = parts.every((p) => p.visible);
+      const someVisible = parts.some((p) => p.visible);
+      return {
+        category,
+        count: parts.length,
+        allVisible,
+        someVisible,
+        parts
+      };
+    });
+
+  return {
+    totalCount,
+    visibleCount,
+    selectedIds: Array.from(selectedDbIdSet),
+    categories
+  };
 }
 
 /**
@@ -156,7 +1111,10 @@ export function getViewer() {
  */
 function unloadCurrentModels() {
   if (!viewerInstance) return;
-  customDemoMetadataMap.clear();
+  partRegistry.clear();
+  fragIdToDbIdMap.clear();
+  selectedDbIdSet.clear();
+  globalNormalizedBox = null;
 
   try {
     const models = viewerInstance.impl?.modelQueue?.()?.getModels?.() || [];
@@ -177,14 +1135,14 @@ function unloadCurrentModels() {
  * - Mendukung model 3D/BIM lokal (`.IFC`, `.GLB`, `.GLTF`, `.OBJ`, `.STL`, `.NWDJSON`)
  *   tanpa kartu kredit / tanpa cloud menggunakan SceneBuilder
  * - Mendukung Built-in Industrial Plant Demo
- *
- * @param {Object} modelRecord - Metadata model dari IndexedDB
- * @param {HTMLElement} container - Container DOM #forgeViewer
- * @param {(selectionInfo: Object) => void} [onSelectionChanged]
- * @returns {Promise<any>}
  */
-export async function loadOfflineModel(modelRecord, container, onSelectionChanged) {
-  const viewer = await initViewer(container, onSelectionChanged);
+export async function loadOfflineModel(
+  modelRecord,
+  container,
+  onSelectionChanged,
+  onHierarchyChanged
+) {
+  const viewer = await initViewer(container, onSelectionChanged, onHierarchyChanged);
   unloadCurrentModels();
   currentLoadedModelId = modelRecord.id;
 
@@ -200,7 +1158,10 @@ export async function loadOfflineModel(modelRecord, container, onSelectionChange
     String(modelRecord.svfPath || '').startsWith('local3d://') ||
     isLocal3DByExt
   ) {
-    const storedFilePath = String(modelRecord.svfPath || modelRecord.name).replace(/^local3d:\/\//, '');
+    const storedFilePath = String(modelRecord.svfPath || modelRecord.name).replace(
+      /^local3d:\/\//,
+      ''
+    );
     let fileRecord = await getModelFile(modelRecord.id, storedFilePath);
     if ((!fileRecord || !fileRecord.data) && modelRecord.name) {
       fileRecord = await getModelFile(modelRecord.id, modelRecord.name);
@@ -224,7 +1185,9 @@ export async function loadOfflineModel(modelRecord, container, onSelectionChange
 
     const onGeometryLoaded = (evt) => {
       viewer.removeEventListener(Av.GEOMETRY_LOADED_EVENT, onGeometryLoaded);
-      viewer.fitToView();
+      populatePartRegistryFromSvfModel(evt.model || viewer.model);
+      fitToViewAll({ resetIso: true, immediate: true });
+      notifyHierarchyChanged();
       resolve(evt.model);
     };
 
@@ -235,8 +1198,10 @@ export async function loadOfflineModel(modelRecord, container, onSelectionChange
       {},
       (loadedModel) => {
         setTimeout(() => {
-          viewer.fitToView();
-        }, 350);
+          populatePartRegistryFromSvfModel(loadedModel || viewer.model);
+          fitToViewAll({ resetIso: true, immediate: true });
+          notifyHierarchyChanged();
+        }, 400);
         setTimeout(() => resolve(loadedModel), 900);
       },
       (errorCode, errorMessage) => {
@@ -254,29 +1219,93 @@ export async function loadOfflineModel(modelRecord, container, onSelectionChange
 }
 
 /**
+ * Mengisi `partRegistry` dari model .SVF standar agar Selection Tree & FitToView
+ * juga bekerja mulus pada model hasil konversi Cloud SVF.
+ */
+function populatePartRegistryFromSvfModel(model) {
+  if (!model || partRegistry.size > 0) return;
+  const THREE = window.THREE;
+  const fragList = model.getFragmentList?.();
+  const tree = model.getInstanceTree?.();
+  if (!fragList) return;
+
+  const fragCount = fragList.getCount ? fragList.getCount() : fragList.fragments?.length || 0;
+  const tmpBox = new THREE.Box3();
+  const overallBox = new THREE.Box3();
+
+  for (let fragId = 0; fragId < fragCount; fragId++) {
+    fragList.getWorldBounds(fragId, tmpBox);
+    if (tmpBox.isEmpty()) continue;
+
+    const dbId =
+      fragList.fragments?.fragId2dbId?.[fragId] ||
+      (typeof fragList.getDbIds === 'function' ? fragList.getDbIds(fragId) : fragId + 1) ||
+      fragId + 1;
+
+    fragIdToDbIdMap.set(fragId, dbId);
+    overallBox.union(tmpBox);
+
+    if (!partRegistry.has(dbId)) {
+      let nodeName = `Component #${dbId}`;
+      let parentCategory = 'SVF Model Elements';
+      if (tree) {
+        nodeName = tree.getNodeName(dbId) || nodeName;
+        const parentId = tree.getNodeParentId?.(dbId);
+        if (parentId) {
+          parentCategory = tree.getNodeName(parentId) || parentCategory;
+        }
+      }
+
+      const clonedBox = tmpBox.clone();
+      partRegistry.set(dbId, {
+        dbId,
+        name: nodeName,
+        category: parentCategory,
+        system: 'SVF Derivative',
+        material: 'SVF Material',
+        colorHex: 0x38bdf8,
+        specs: { 'Element Name': nodeName, dbId: String(dbId) },
+        bbox: clonedBox,
+        center: clonedBox.getCenter(new THREE.Vector3()),
+        size: clonedBox.getSize(new THREE.Vector3()),
+        visible: true,
+        selected: false,
+        fragIds: [fragId],
+        meshes: []
+      });
+    } else {
+      const existing = partRegistry.get(dbId);
+      existing.fragIds.push(fragId);
+      existing.bbox.union(tmpBox);
+      existing.center = existing.bbox.getCenter(new THREE.Vector3());
+      existing.size = existing.bbox.getSize(new THREE.Vector3());
+    }
+  }
+
+  if (!overallBox.isEmpty()) {
+    globalNormalizedBox = overallBox;
+  }
+}
+
+/**
  * Membangun scene 3D di dalam Autodesk GuiViewer3D dari hasil parsing file lokal
- * (.IFC, .GLB, .GLTF, .OBJ, .STL, atau .NWDJSON hasil ekstraksi viewer.autodesk.com).
- * Dilengkapi Auto-Centering Bounding Box & 16-bit Index Chunking (<= 54.000 vertex per mesh)
- * agar tidak terjadi garis-garis/spiky artifact pada model 3D berukuran besar.
+ * (.IFC, .GLB, .GLTF, .OBJ, .STL, atau .NWDJSON).
+ *
+ * Fitur Utama:
+ * 1. Georeferenced IFC Normalization: Menghitung median cluster center untuk mengabaikan
+ *    titik helper/origin kosong di (0,0,0), lalu menggeser seluruh model tepat ke (0,0,0).
+ * 2. 16-bit Vertex Chunking (<= 54.000 vertex per mesh) untuk mencegah garis pecah.
+ * 3. Registrasi setiap part (`dbId`) ke `partRegistry` lengkap dengan `THREE.Box3` presisi.
+ * 4. Full Model `fitToViewAll` otomatis selesai load.
  */
 async function buildCustomParsedMeshScene(viewer, modelName, meshItems) {
-  const ext = await viewer.loadExtension('Autodesk.Viewing.SceneBuilder');
-  const modelBuilder = await ext.addNewModel({
-    conserveMemory: false,
-    modelNameOverride: modelName || 'Local_3D_Model'
-  });
-
   const THREE = window.THREE;
-  customDemoMetadataMap.clear();
+  partRegistry.clear();
+  fragIdToDbIdMap.clear();
+  selectedDbIdSet.clear();
 
-  // Tahap 1: Siapkan geometri non-indexed dan hitung Global Bounding Box untuk Auto-Centering
-  const preparedMeshes = [];
-  let minX = Infinity;
-  let minY = Infinity;
-  let minZ = Infinity;
-  let maxX = -Infinity;
-  let maxY = -Infinity;
-  let maxZ = -Infinity;
+  // TAHAP 1: Validasi setiap mesh & hitung bounding box mentah masing-masing part
+  const validItems = [];
 
   for (let i = 0; i < meshItems.length; i++) {
     const item = meshItems[i];
@@ -298,9 +1327,16 @@ async function buildCustomParsedMeshScene(viewer, modelName, meshItems) {
       normFloats = null;
     }
 
-    // Pastikan kelipatan 9 float (1 segitiga = 3 vertex = 9 float) dan bebas NaN/Infinity
     const validFloatLen = Math.floor(posFloats.length / 9) * 9;
     if (validFloatLen < 9) continue;
+
+    let pMinX = Infinity;
+    let pMinY = Infinity;
+    let pMinZ = Infinity;
+    let pMaxX = -Infinity;
+    let pMaxY = -Infinity;
+    let pMaxZ = -Infinity;
+    let validVertexCount = 0;
 
     for (let j = 0; j < validFloatLen; j += 3) {
       const x = posFloats[j];
@@ -312,45 +1348,111 @@ async function buildCustomParsedMeshScene(viewer, modelName, meshItems) {
         posFloats[j + 2] = 0;
         continue;
       }
-      if (x < minX) minX = x;
-      if (y < minY) minY = y;
-      if (z < minZ) minZ = z;
-      if (x > maxX) maxX = x;
-      if (y > maxY) maxY = y;
-      if (z > maxZ) maxZ = z;
+      validVertexCount++;
+      if (x < pMinX) pMinX = x;
+      if (y < pMinY) pMinY = y;
+      if (z < pMinZ) pMinZ = z;
+      if (x > pMaxX) pMaxX = x;
+      if (y > pMaxY) pMaxY = y;
+      if (z > pMaxZ) pMaxZ = z;
     }
 
-    preparedMeshes.push({
+    if (validVertexCount < 3 || !Number.isFinite(pMinX)) continue;
+    const spanX = pMaxX - pMinX;
+    const spanY = pMaxY - pMinY;
+    const spanZ = pMaxZ - pMinZ;
+    // Abaikan geometri degenerate yang ukurannya 0 di semua sumbu
+    if (spanX < 1e-6 && spanY < 1e-6 && spanZ < 1e-6) continue;
+
+    validItems.push({
       item,
-      posFloats: validFloatLen === posFloats.length ? posFloats : posFloats.subarray(0, validFloatLen),
+      posFloats:
+        validFloatLen === posFloats.length ? posFloats : posFloats.subarray(0, validFloatLen),
       normFloats:
         normFloats && normFloats.length >= validFloatLen
           ? normFloats.subarray(0, validFloatLen)
-          : null
+          : null,
+      rawMin: new THREE.Vector3(pMinX, pMinY, pMinZ),
+      rawMax: new THREE.Vector3(pMaxX, pMaxY, pMaxZ),
+      rawCenter: new THREE.Vector3(
+        (pMinX + pMaxX) * 0.5,
+        (pMinY + pMaxY) * 0.5,
+        (pMinZ + pMaxZ) * 0.5
+      )
     });
   }
 
-  const centerX = Number.isFinite(minX) && Number.isFinite(maxX) ? (minX + maxX) * 0.5 : 0;
-  const centerY = Number.isFinite(minY) && Number.isFinite(maxY) ? (minY + maxY) * 0.5 : 0;
-  const centerZ = Number.isFinite(minZ) && Number.isFinite(maxZ) ? (minZ + maxZ) * 0.5 : 0;
+  if (validItems.length === 0) {
+    throw new Error('Tidak ditemukan geometri 3D valid di dalam file.');
+  }
 
-  // Batas maksimum float per sub-mesh: 18.000 segitiga = 54.000 vertex = 162.000 float
-  // (Mencegah overflow Uint16Array 65.535 vertex di dalam Autodesk Viewer Three.js r71)
-  const MAX_FLOATS_PER_CHUNK = 162000;
-  const materialCache = new Set();
+  // TAHAP 2: Georeferenced IFC Fix (Gunakan Median Center & Cluster Box agar titik (0,0,0) kosong tidak merusak pusat)
+  const xs = validItems.map((v) => v.rawCenter.x).sort((a, b) => a - b);
+  const ys = validItems.map((v) => v.rawCenter.y).sort((a, b) => a - b);
+  const zs = validItems.map((v) => v.rawCenter.z).sort((a, b) => a - b);
+  const midIdx = Math.floor(validItems.length / 2);
+  const medianCenter = new THREE.Vector3(xs[midIdx], ys[midIdx], zs[midIdx]);
 
-  // Tahap 2: Geser titik tengah ke (0,0,0), bagi sub-mesh jika >54.000 vertex, dan masukkan ke SceneBuilder
-  for (let i = 0; i < preparedMeshes.length; i++) {
-    const { item, posFloats, normFloats } = preparedMeshes[i];
+  // Hitung jarak setiap part dari medianCenter untuk mendeteksi outlier ekstrem
+  const dists = validItems
+    .map((v) => v.rawCenter.distanceTo(medianCenter))
+    .sort((a, b) => a - b);
+  const p95Dist = dists[Math.floor(dists.length * 0.95)] || 100;
+  const clusterRadiusThreshold = Math.max(p95Dist * 6, 500);
 
-    // Geser seluruh vertex ke pusat (0,0,0)
-    if (centerX !== 0 || centerY !== 0 || centerZ !== 0) {
-      for (let j = 0; j < posFloats.length; j += 3) {
-        posFloats[j] -= centerX;
-        posFloats[j + 1] -= centerY;
-        posFloats[j + 2] -= centerZ;
-      }
+  const clusterBox = new THREE.Box3();
+  for (const entry of validItems) {
+    if (entry.rawCenter.distanceTo(medianCenter) <= clusterRadiusThreshold) {
+      clusterBox.expandByPoint(entry.rawMin);
+      clusterBox.expandByPoint(entry.rawMax);
     }
+  }
+  if (clusterBox.isEmpty()) {
+    for (const entry of validItems) {
+      clusterBox.expandByPoint(entry.rawMin);
+      clusterBox.expandByPoint(entry.rawMax);
+    }
+  }
+
+  const worldCenterOffset = clusterBox.getCenter(new THREE.Vector3());
+
+  // Geser seluruh koordinat model agar tengah-tengah Bounding Box berada tepat di (0, 0, 0)
+  const normalizedGlobalBox = new THREE.Box3();
+  for (const entry of validItems) {
+    const pos = entry.posFloats;
+    for (let j = 0; j < pos.length; j += 3) {
+      pos[j] -= worldCenterOffset.x;
+      pos[j + 1] -= worldCenterOffset.y;
+      pos[j + 2] -= worldCenterOffset.z;
+    }
+    entry.rawMin.sub(worldCenterOffset);
+    entry.rawMax.sub(worldCenterOffset);
+    entry.rawCenter.sub(worldCenterOffset);
+
+    if (entry.rawCenter.length() <= clusterRadiusThreshold) {
+      normalizedGlobalBox.expandByPoint(entry.rawMin);
+      normalizedGlobalBox.expandByPoint(entry.rawMax);
+    }
+  }
+
+  if (normalizedGlobalBox.isEmpty()) {
+    normalizedGlobalBox.set(new THREE.Vector3(-10, -10, -10), new THREE.Vector3(10, 10, 10));
+  }
+  globalNormalizedBox = normalizedGlobalBox.clone();
+
+  // TAHAP 3: Buat Model di SceneBuilder dengan bbox yang sudah dinormalisasi
+  const ext = await viewer.loadExtension('Autodesk.Viewing.SceneBuilder');
+  const modelBuilder = await ext.addNewModel({
+    conserveMemory: false,
+    modelNameOverride: modelName || 'Local_3D_Model',
+    bbox: globalNormalizedBox.clone()
+  });
+
+  const MAX_FLOATS_PER_CHUNK = 162000; // <= 54.000 vertex per chunk (aman untuk Uint16Array)
+
+  for (let i = 0; i < validItems.length; i++) {
+    const { item, posFloats, normFloats, rawMin, rawMax } = validItems[i];
+    const dbId = i + 1;
 
     const finalNormals =
       normFloats && normFloats.length === posFloats.length
@@ -358,32 +1460,29 @@ async function buildCustomParsedMeshScene(viewer, modelName, meshItems) {
         : computeVertexNormals(posFloats, null);
 
     const colorHex = item.colorHex || 0x38bdf8;
-    const matKey = `mat_shared_${colorHex.toString(16)}`;
-    if (!materialCache.has(matKey)) {
-      const mat = new THREE.MeshPhongMaterial({
-        color: new THREE.Color(colorHex),
-        specular: new THREE.Color(0x334155),
-        shininess: 38,
-        side: THREE.DoubleSide
-      });
-      modelBuilder.addMaterial(matKey, mat);
-      materialCache.add(matKey);
-    }
+    const matKey = `mat_part_${dbId}`;
+    const mat = new THREE.MeshPhongMaterial({
+      color: new THREE.Color(colorHex),
+      specular: new THREE.Color(0x334155),
+      shininess: 38,
+      side: THREE.DoubleSide
+    });
+    modelBuilder.addMaterial(matKey, mat);
+
+    const partBBox = new THREE.Box3(rawMin.clone(), rawMax.clone());
+    const partMeshes = [];
+    const partFragIds = [];
 
     for (let offset = 0; offset < posFloats.length; offset += MAX_FLOATS_PER_CHUNK) {
       const end = Math.min(offset + MAX_FLOATS_PER_CHUNK, posFloats.length);
       const chunkPos =
         offset === 0 && end === posFloats.length
           ? posFloats
-          : new Float32Array(posFloats.buffer, posFloats.byteOffset + offset * 4, end - offset);
+          : posFloats.slice(offset, end);
       const chunkNorm =
         offset === 0 && end === finalNormals.length
           ? finalNormals
-          : new Float32Array(
-              finalNormals.buffer,
-              finalNormals.byteOffset + offset * 4,
-              end - offset
-            );
+          : finalNormals.slice(offset, end);
 
       const bufGeom = new THREE.BufferGeometry();
       const posAttr = new THREE.BufferAttribute(chunkPos, 3);
@@ -400,39 +1499,107 @@ async function buildCustomParsedMeshScene(viewer, modelName, meshItems) {
       bufGeom.computeBoundingBox();
       bufGeom.computeBoundingSphere();
 
-      const mesh = new THREE.Mesh(bufGeom, modelBuilder.findMaterial(matKey));
+      const mesh = new THREE.Mesh(bufGeom, mat);
+      mesh.dbId = dbId; // PENTING: Set dbId sebelum addMesh agar SceneBuilder memetakan dbId dengan benar!
+      mesh.PositionIsWorld = true;
       mesh.matrixAutoUpdate = false;
       mesh.updateMatrix();
+      mesh.updateMatrixWorld(true);
 
-      const dbId = modelBuilder.addMesh(mesh);
-      customDemoMetadataMap.set(dbId, {
-        dbId,
-        name: item.name || `Component #${i + 1}`,
-        category: item.category || '3D Element',
-        system: item.system || modelName,
-        material: item.materialName || 'CAD Material',
-        specs: item.specs || {
-          'Element Name': item.name || `Component #${i + 1}`,
-          Triangles: String(Math.floor(posFloats.length / 9))
-        }
-      });
+      modelBuilder.addMesh(mesh);
+
+      partMeshes.push(mesh);
+      if (mesh.fragId !== undefined) {
+        partFragIds.push(mesh.fragId);
+        fragIdToDbIdMap.set(mesh.fragId, dbId);
+      }
     }
+
+    partRegistry.set(dbId, {
+      dbId,
+      name: item.name || `Component #${dbId}`,
+      category: item.category || '3D Elements',
+      system: item.system || modelName,
+      material: item.materialName || 'CAD Material',
+      colorHex,
+      specs: item.specs || {
+        'Element Name': item.name || `Component #${dbId}`,
+        Category: item.category || '3D Elements',
+        Triangles: String(Math.floor(posFloats.length / 9))
+      },
+      bbox: partBBox,
+      center: partBBox.getCenter(new THREE.Vector3()),
+      size: partBBox.getSize(new THREE.Vector3()),
+      visible: true,
+      selected: false,
+      fragIds: partFragIds,
+      meshes: partMeshes,
+      originalMaterial: mat,
+      highlightMaterial: null,
+      modelBuilder
+    });
   }
 
-  viewer.fitToView();
+  // Patch instanceTree.nodeAccess pada SceneBuilder agar getNodeBox dan nama part bekerja di seluruh engine
+  patchSceneBuilderInstanceTree(modelBuilder, modelName);
+
+  // Tampilkan keseluruhan model 3D secara utuh (Full Framing)
+  fitToViewAll({ resetIso: true, immediate: true });
+  notifyHierarchyChanged();
+
   return modelBuilder.model;
 }
 
 /**
- * Me-load model langsung dari Autodesk Cloud URN (Mode Online).
- * @param {string} urn - Base64 URN
- * @param {string} accessToken - Token OAuth2 APS
- * @param {HTMLElement} container
- * @param {(selectionInfo: Object) => void} [onSelectionChanged]
- * @returns {Promise<any>}
+ * Memperbaiki bug bawaan `SceneBuilder.min.js` di mana `nodeAccess.getNodeBox` mengosongkan box.
  */
-export async function loadCloudModelByUrn(urn, accessToken, container, onSelectionChanged) {
-  const viewer = await initViewer(container, onSelectionChanged);
+function patchSceneBuilderInstanceTree(modelBuilder, modelName) {
+  try {
+    const data = modelBuilder.model?.getData?.();
+    if (data && globalNormalizedBox) {
+      data.bbox = globalNormalizedBox.clone();
+      data.modelSpaceBBox = globalNormalizedBox.clone();
+    }
+
+    const nodeAccess = modelBuilder.instanceTree?.nodeAccess;
+    if (nodeAccess) {
+      nodeAccess.nodeBoxes = true;
+      nodeAccess.getNodeBox = (dbId, outBox) => {
+        const part = partRegistry.get(Number(dbId));
+        const b = part?.bbox || globalNormalizedBox;
+        if (!b || !outBox) return;
+        if (outBox.min && outBox.max) {
+          outBox.copy(b);
+        } else {
+          outBox[0] = b.min.x;
+          outBox[1] = b.min.y;
+          outBox[2] = b.min.z;
+          outBox[3] = b.max.x;
+          outBox[4] = b.max.y;
+          outBox[5] = b.max.z;
+        }
+      };
+      nodeAccess.name = (dbId) => {
+        if (dbId === nodeAccess.rootId) return modelName || 'Model Root';
+        return partRegistry.get(Number(dbId))?.name || `Part #${dbId}`;
+      };
+    }
+  } catch {
+    // Abaikan
+  }
+}
+
+/**
+ * Me-load model langsung dari Autodesk Cloud URN (Mode Online).
+ */
+export async function loadCloudModelByUrn(
+  urn,
+  accessToken,
+  container,
+  onSelectionChanged,
+  onHierarchyChanged
+) {
+  const viewer = await initViewer(container, onSelectionChanged, onHierarchyChanged);
   unloadCurrentModels();
   currentLoadedModelId = `cloud_${urn.slice(0, 16)}`;
 
@@ -454,7 +1621,9 @@ export async function loadCloudModelByUrn(urn, accessToken, container, onSelecti
           return;
         }
         viewer.loadDocumentNode(doc, defaultGeometry).then((model) => {
-          viewer.fitToView();
+          populatePartRegistryFromSvfModel(model);
+          fitToViewAll({ resetIso: true, immediate: true });
+          notifyHierarchyChanged();
           resolve(model);
         });
       },
@@ -466,45 +1635,90 @@ export async function loadCloudModelByUrn(urn, accessToken, container, onSelecti
 }
 
 /**
- * Membangun Model 3D Industrial Process Plant / MEP BIM interaktif menggunakan
- * `Autodesk.Viewing.SceneBuilder` agar user dapat langsung menguji seluruh
- * fitur Navisworks secara 100% Offline.
+ * Membangun Model 3D Industrial Process Plant / MEP BIM interaktif (Demo 100% Offline).
  */
 async function buildIndustrialPlantDemoScene(viewer, modelRecord) {
+  const THREE = window.THREE;
+  partRegistry.clear();
+  fragIdToDbIdMap.clear();
+  selectedDbIdSet.clear();
+
+  const overallDemoBox = new THREE.Box3(
+    new THREE.Vector3(-15, -1, -10),
+    new THREE.Vector3(15, 11, 10)
+  );
+  globalNormalizedBox = overallDemoBox.clone();
+
   const ext = await viewer.loadExtension('Autodesk.Viewing.SceneBuilder');
   const modelBuilder = await ext.addNewModel({
     conserveMemory: false,
-    modelNameOverride: modelRecord.name || 'Industrial_Process_Plant_Area01.nwd'
+    modelNameOverride: modelRecord.name || 'Industrial_Process_Plant_Area01.nwd',
+    bbox: overallDemoBox.clone()
   });
 
-  const THREE = window.THREE;
-  customDemoMetadataMap.clear();
+  let nextDbId = 1;
 
-  function addBimComponent({ name, category, system, materialName, colorHex, geometry, position, rotation, specs }) {
+  function addBimComponent({
+    name,
+    category,
+    system,
+    materialName,
+    colorHex,
+    geometry,
+    position,
+    rotation,
+    specs
+  }) {
+    const dbId = nextDbId++;
     const mat = new THREE.MeshPhongMaterial({
       color: new THREE.Color(colorHex),
       specular: new THREE.Color(0x334155),
-      shininess: 42
+      shininess: 42,
+      side: THREE.DoubleSide
     });
-    modelBuilder.addMaterial(materialName + '_' + name, mat);
+    modelBuilder.addMaterial(`${materialName}_${dbId}`, mat);
+
+    geometry.computeBoundingBox();
+    geometry.computeBoundingSphere();
 
     const mesh = new THREE.Mesh(geometry, mat);
+    mesh.dbId = dbId;
     mesh.matrixAutoUpdate = false;
     mesh.position.set(position[0], position[1], position[2]);
     if (rotation) {
       mesh.rotation.set(rotation[0], rotation[1], rotation[2]);
     }
     mesh.updateMatrix();
+    mesh.updateMatrixWorld(true);
 
-    const dbId = modelBuilder.addMesh(mesh);
-    customDemoMetadataMap.set(dbId, {
+    const worldBox = geometry.boundingBox.clone().applyMatrix4(mesh.matrixWorld);
+    modelBuilder.addMesh(mesh);
+
+    const fragIds = mesh.fragId !== undefined ? [mesh.fragId] : [];
+    if (mesh.fragId !== undefined) {
+      fragIdToDbIdMap.set(mesh.fragId, dbId);
+    }
+
+    partRegistry.set(dbId, {
       dbId,
       name,
       category,
       system,
       material: materialName,
-      specs: specs || {}
+      colorHex,
+      specs: specs || {},
+      bbox: worldBox,
+      center: worldBox.getCenter(new THREE.Vector3()),
+      size: worldBox.getSize(new THREE.Vector3()),
+      visible: true,
+      selected: false,
+      fragIds,
+      meshes: [mesh],
+      originalMaterial: mat,
+      highlightMaterial: null,
+      modelBuilder
     });
+
     return dbId;
   }
 
@@ -752,13 +1966,326 @@ async function buildIndustrialPlantDemoScene(viewer, modelRecord) {
     }
   });
 
-  viewer.fitToView();
+  patchSceneBuilderInstanceTree(modelBuilder, modelRecord.name);
+  fitToViewAll({ resetIso: true, immediate: true });
+  notifyHierarchyChanged();
+
   return modelBuilder.model;
 }
 
 /**
- * Mencari elemen 3D berdasarkan kata kunci nama atau nilai properti BIM,
- * kemudian melakukan Isolate & Fit-to-View ke hasil pencarian.
+ * Menghitung `THREE.Box3` yang presisi dari seluruh part yang sedang `visible === true`
+ * (atau khusus `targetDbIds` jika ditentukan).
+ * @param {number[] | null} [targetDbIds=null]
+ * @returns {THREE.Box3}
+ */
+function computeFramingBoundingBox(targetDbIds = null) {
+  const THREE = window.THREE;
+  const box = new THREE.Box3();
+
+  // 1. Jika menargetkan dbId spesifik (misalnya Focus Part)
+  if (Array.isArray(targetDbIds) && targetDbIds.length > 0) {
+    for (const rawId of targetDbIds) {
+      const part = partRegistry.get(Number(rawId));
+      if (part && part.bbox && !part.bbox.isEmpty()) {
+        box.union(part.bbox);
+      }
+    }
+    if (!box.isEmpty()) return box;
+  }
+
+  // 2. Untuk Fit All (seluruh part yang sedang visible === true)
+  const visibleParts = [];
+  for (const part of partRegistry.values()) {
+    if (part.visible && part.bbox && !part.bbox.isEmpty()) {
+      visibleParts.push(part);
+    }
+  }
+
+  if (visibleParts.length > 0) {
+    // Jika hampir semua part visible dan kita punya globalNormalizedBox yang sudah bersih dari outlier
+    if (visibleParts.length === partRegistry.size && globalNormalizedBox && !globalNormalizedBox.isEmpty()) {
+      return globalNormalizedBox.clone();
+    }
+    for (const part of visibleParts) {
+      box.union(part.bbox);
+    }
+    if (!box.isEmpty()) return box;
+  }
+
+  // 3. Fallback ke globalNormalizedBox atau model.getBoundingBox()
+  if (globalNormalizedBox && !globalNormalizedBox.isEmpty()) {
+    return globalNormalizedBox.clone();
+  }
+
+  const modelBox = viewerInstance?.model?.getBoundingBox?.();
+  if (modelBox && !modelBox.isEmpty()) {
+    return modelBox.clone();
+  }
+
+  return new THREE.Box3(new THREE.Vector3(-10, -10, -10), new THREE.Vector3(10, 10, 10));
+}
+
+/**
+ * Fungsi inti `fitToView` sesuai spesifikasi matematika FOV kamera:
+ * - Menghitung `center` & `size` dari `THREE.Box3`
+ * - `maxDim = Math.max(size.x, size.y, size.z)`
+ * - `distance = (maxDim / 2) / Math.tan(fov / 2) * 1.5`
+ * - Mengatur `controlsState.target`, `camera.position`, `camera.near`, dan `camera.far`.
+ *
+ * @param {number[] | null} [targetDbIds=null]
+ * @param {{resetIso?: boolean, immediate?: boolean}} [options]
+ */
+function frameBoundingBoxInCamera(targetDbIds = null, options = {}) {
+  if (!viewerInstance || !viewerInstance.impl?.camera) return;
+  const THREE = window.THREE;
+  const cam = viewerInstance.impl.camera;
+  const canvas = viewerInstance.canvas || viewerInstance.impl.canvas;
+
+  const box = computeFramingBoundingBox(targetDbIds);
+  const center = box.getCenter(new THREE.Vector3());
+  const size = box.getSize(new THREE.Vector3());
+
+  let maxDim = Math.max(size.x, size.y, size.z);
+  if (!Number.isFinite(maxDim) || maxDim <= 0.001) {
+    maxDim = 10;
+  }
+
+  // Jika melakukan Fit All, simpan skala model utama
+  if (!targetDbIds || targetDbIds.length === 0) {
+    controlsState.modelMaxDim = maxDim;
+  }
+
+  const fovDeg = cam.fov || 45;
+  const fov = fovDeg * (Math.PI / 180);
+  const aspect = canvas ? canvas.clientWidth / Math.max(1, canvas.clientHeight) : 1.5;
+
+  // Rumus jarak kamera: (maxDim / 2) / Math.tan(fov / 2) * 1.5
+  let distance = ((maxDim / 2) / Math.tan(fov / 2)) * 1.5;
+  if (aspect < 1) {
+    distance = distance / aspect;
+  }
+  distance = Math.max(distance, controlsState.minDistance * 2);
+
+  // Tentukan arah sudut pandang kamera
+  let direction = new THREE.Vector3(1, 0.78, 1).normalize();
+  if (!options.resetIso) {
+    const currentOffset = cam.position.clone().sub(controlsState.target);
+    if (currentOffset.lengthSq() > 0.0001) {
+      direction = currentOffset.normalize();
+    }
+  }
+
+  const newTarget = center.clone();
+  const newPosition = center.clone().add(direction.multiplyScalar(distance));
+
+  // Update Clipping Plane secara dinamis
+  cam.near = Math.max(0.01, maxDim / 1000);
+  cam.far = Math.max(10000, maxDim * 100);
+  if (typeof cam.updateProjectionMatrix === 'function') {
+    cam.updateProjectionMatrix();
+  }
+
+  if (options.immediate) {
+    syncCameraStateToViewer(newPosition, newTarget, new THREE.Vector3(0, 1, 0));
+  } else {
+    animateCameraTransition(newPosition, newTarget, 260);
+  }
+
+  showOrbitPivotIndicator(newTarget, 900);
+}
+
+/**
+ * Menampilkan keseluruhan 3D Model yang sedang `visible` secara utuh dari ujung ke ujung (`Fit All`).
+ * @param {{resetIso?: boolean, immediate?: boolean}} [options]
+ */
+export function fitToViewAll(options = {}) {
+  frameBoundingBoxInCamera(null, options);
+}
+
+/**
+ * Memfokuskan & melakukan Zoom-to-Fit ke daftar `dbId` tertentu (atau part yang sedang dipilih).
+ * @param {number[]} [dbIds]
+ */
+export function focusOnDbIds(dbIds = null) {
+  const targets =
+    Array.isArray(dbIds) && dbIds.length > 0 ? dbIds : Array.from(selectedDbIdSet);
+
+  if (!targets || targets.length === 0) {
+    fitToViewAll();
+    return;
+  }
+
+  frameBoundingBoxInCamera(targets, { resetIso: false, immediate: false });
+}
+
+/**
+ * Kompatibilitas tombol "Fit View" utama: menampilkan keseluruhan model 3D secara utuh.
+ */
+export function fitToView() {
+  fitToViewAll({ resetIso: false, immediate: false });
+}
+
+/**
+ * Mengubah visibilitas (Hide / Unhide) satu atau beberapa `dbId`.
+ * @param {number | number[]} dbIds
+ * @param {boolean} [forceVisible] - Jika undefined, otomatis toggle status saat ini
+ * @returns {boolean} Status visibilitas baru
+ */
+export function setPartsVisibility(dbIds, forceVisible = undefined) {
+  if (!viewerInstance) return true;
+  const list = Array.isArray(dbIds) ? dbIds.map(Number) : [Number(dbIds)];
+  if (list.length === 0) return true;
+
+  let targetState = forceVisible;
+  if (targetState === undefined) {
+    const firstPart = partRegistry.get(list[0]);
+    targetState = firstPart ? !firstPart.visible : false;
+  }
+
+  const fragList = viewerInstance.model?.getFragmentList?.();
+
+  for (const id of list) {
+    const part = partRegistry.get(id);
+    if (part) {
+      part.visible = Boolean(targetState);
+      if (fragList && part.fragIds) {
+        for (const fragId of part.fragIds) {
+          try {
+            fragList.setFragOff(fragId, !part.visible);
+          } catch {
+            // Abaikan
+          }
+        }
+      }
+      if (part.meshes) {
+        for (const m of part.meshes) {
+          m.visible = part.visible;
+        }
+      }
+    } else {
+      try {
+        if (targetState) viewerInstance.show(id);
+        else viewerInstance.hide(id);
+      } catch {
+        // Abaikan
+      }
+    }
+  }
+
+  viewerInstance.impl?.invalidate?.(true, true, true);
+  notifyHierarchyChanged();
+  return Boolean(targetState);
+}
+
+/**
+ * Menyembunyikan (atau toggle hide/unhide) part yang sedang dipilih.
+ */
+export function hideSelected() {
+  const selected = Array.from(selectedDbIdSet);
+  if (selected.length === 0) return false;
+  return setPartsVisibility(selected, undefined);
+}
+
+/**
+ * Meng-isolate part yang sedang dipilih (menyembunyikan semua part lain).
+ */
+export function isolateSelected() {
+  const selected = Array.from(selectedDbIdSet);
+  if (selected.length === 0) return false;
+  isolateAndFocusDbIds(selected, null, false);
+  return true;
+}
+
+/**
+ * Meng-isolate daftar `dbIds` tertentu (dan opsional fokus ke salah satu dbId).
+ * @param {number[]} dbIds
+ * @param {number | null} [focusSingleId=null]
+ * @param {boolean} [shouldZoom=true]
+ */
+export function isolateAndFocusDbIds(dbIds, focusSingleId = null, shouldZoom = true) {
+  if (!viewerInstance || !dbIds || dbIds.length === 0) return;
+  const keepSet = new Set(dbIds.map(Number));
+  const fragList = viewerInstance.model?.getFragmentList?.();
+
+  if (partRegistry.size > 0) {
+    for (const part of partRegistry.values()) {
+      const shouldShow = keepSet.has(part.dbId);
+      part.visible = shouldShow;
+      if (fragList && part.fragIds) {
+        for (const fragId of part.fragIds) {
+          try {
+            fragList.setFragOff(fragId, !shouldShow);
+          } catch {
+            // Abaikan
+          }
+        }
+      }
+      if (part.meshes) {
+        for (const m of part.meshes) {
+          m.visible = shouldShow;
+        }
+      }
+    }
+  } else {
+    try {
+      viewerInstance.isolate(dbIds);
+    } catch {
+      // Abaikan
+    }
+  }
+
+  const targetFocus = focusSingleId !== null ? [Number(focusSingleId)] : Array.from(keepSet);
+  applyVisualSelectionHighlight(targetFocus);
+  notifySelectionChanged(targetFocus);
+  notifyHierarchyChanged();
+
+  if (shouldZoom) {
+    focusOnDbIds(targetFocus);
+  } else {
+    viewerInstance.impl?.invalidate?.(true, true, true);
+  }
+}
+
+/**
+ * Menampilkan kembali seluruh part yang tersembunyi (`Show All` / Reset Isolate & Hide).
+ */
+export function showAllObjects() {
+  if (!viewerInstance) return;
+  const fragList = viewerInstance.model?.getFragmentList?.();
+
+  for (const part of partRegistry.values()) {
+    part.visible = true;
+    if (fragList && part.fragIds) {
+      for (const fragId of part.fragIds) {
+        try {
+          fragList.setFragOff(fragId, false);
+        } catch {
+          // Abaikan
+        }
+      }
+    }
+    if (part.meshes) {
+      for (const m of part.meshes) {
+        m.visible = true;
+      }
+    }
+  }
+
+  try {
+    viewerInstance.isolate([]);
+    viewerInstance.showAll();
+  } catch {
+    // Abaikan
+  }
+
+  clearPartSelection();
+  viewerInstance.impl?.invalidate?.(true, true, true);
+  notifyHierarchyChanged();
+}
+
+/**
+ * Mencari elemen 3D berdasarkan kata kunci nama atau nilai properti BIM.
  * @param {string} query
  * @returns {Promise<number[]>} Array dbId yang cocok
  */
@@ -773,16 +2300,15 @@ export async function searchObjectsInModel(query) {
     return [];
   }
 
-  // 1. Jika model adalah Local 3D / Demo SceneBuilder, cari di customDemoMetadataMap
-  if (customDemoMetadataMap.size > 0) {
+  if (partRegistry.size > 0) {
     const matchedIds = [];
-    for (const [dbId, meta] of customDemoMetadataMap.entries()) {
+    for (const [dbId, part] of partRegistry.entries()) {
       const haystack = [
-        meta.name,
-        meta.category,
-        meta.system,
-        meta.material,
-        ...Object.values(meta.specs || {})
+        part.name,
+        part.category,
+        part.system,
+        part.material,
+        ...Object.values(part.specs || {})
       ]
         .join(' ')
         .toLowerCase();
@@ -794,83 +2320,13 @@ export async function searchObjectsInModel(query) {
     return matchedIds;
   }
 
-  // 2. Untuk model SVF standar, gabungkan pencarian InstanceTree + viewer.search()
-  const matchedSet = new Set();
-  const tree = viewerInstance.model.getInstanceTree?.();
-
-  if (tree) {
-    tree.enumNodeChildren(
-      tree.getRootId(),
-      (dbId) => {
-        const nodeName = String(tree.getNodeName(dbId) || '').toLowerCase();
-        if (nodeName.includes(cleanQuery)) {
-          matchedSet.add(dbId);
-        }
-      },
-      true
-    );
-  }
-
   return new Promise((resolve) => {
     viewerInstance.search(
       cleanQuery,
-      (dbIds) => {
-        if (Array.isArray(dbIds)) {
-          dbIds.forEach((id) => matchedSet.add(id));
-        }
-        resolve(Array.from(matchedSet));
-      },
-      () => {
-        resolve(Array.from(matchedSet));
-      }
+      (dbIds) => resolve(Array.isArray(dbIds) ? dbIds : []),
+      () => resolve([])
     );
   });
-}
-
-/**
- * Meng-isolate dan memfokuskan kamera ke daftar dbIds tertentu.
- * @param {number[]} dbIds
- * @param {number} [focusSingleId]
- */
-export function isolateAndFocusDbIds(dbIds, focusSingleId = null) {
-  if (!viewerInstance || !viewerInstance.model) return;
-  if (!dbIds || dbIds.length === 0) return;
-
-  viewerInstance.isolate(dbIds);
-  const targetFocus = focusSingleId !== null ? [focusSingleId] : dbIds;
-  viewerInstance.select(targetFocus);
-  viewerInstance.fitToView(targetFocus);
-}
-
-export function fitToView() {
-  if (!viewerInstance) return;
-  const selected = viewerInstance.getSelection();
-  viewerInstance.fitToView(selected && selected.length > 0 ? selected : undefined);
-}
-
-export function isolateSelected() {
-  if (!viewerInstance) return;
-  const selected = viewerInstance.getSelection();
-  if (selected && selected.length > 0) {
-    viewerInstance.isolate(selected);
-    viewerInstance.fitToView(selected);
-  }
-}
-
-export function hideSelected() {
-  if (!viewerInstance) return;
-  const selected = viewerInstance.getSelection();
-  if (selected && selected.length > 0) {
-    viewerInstance.hide(selected);
-    viewerInstance.clearSelection();
-  }
-}
-
-export function showAllObjects() {
-  if (!viewerInstance) return;
-  viewerInstance.isolate([]);
-  viewerInstance.showAll();
-  viewerInstance.clearSelection();
 }
 
 export function toggleGhosting() {
@@ -946,14 +2402,21 @@ export function getSavedViewpoints(modelId = getActiveModelIdForViewpoints()) {
 }
 
 export function saveCurrentViewpoint(viewpointName, modelId = getActiveModelIdForViewpoints()) {
-  if (!viewerInstance) {
+  if (!viewerInstance || !viewerInstance.impl?.camera) {
     throw new Error('3D Viewer belum aktif.');
   }
+
+  const cam = viewerInstance.impl.camera;
+  const customCamState = {
+    position: [cam.position.x, cam.position.y, cam.position.z],
+    target: [controlsState.target.x, controlsState.target.y, controlsState.target.z],
+    up: [cam.up.x, cam.up.y, cam.up.z]
+  };
 
   const viewerState = viewerInstance.getState({
     viewport: true,
     cutplanes: true,
-    objectSet: true,
+    objectSet: false,
     renderOptions: false
   });
 
@@ -962,7 +2425,8 @@ export function saveCurrentViewpoint(viewpointName, modelId = getActiveModelIdFo
     id: `vp_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
     name: (viewpointName || '').trim() || `Viewpoint #${existing.length + 1}`,
     createdAt: new Date().toISOString(),
-    state: viewerState
+    state: viewerState,
+    customCamera: customCamState
   };
 
   existing.unshift(newVp);
@@ -970,16 +2434,30 @@ export function saveCurrentViewpoint(viewpointName, modelId = getActiveModelIdFo
   return newVp;
 }
 
-export function restoreSavedViewpoint(viewpoint) {
-  if (!viewerInstance || !viewpoint || !viewpoint.state) return;
-  viewerInstance.restoreState(
-    viewpoint.state,
-    { viewport: true, cutplanes: true, objectSet: true },
-    false
-  );
+export function restoreSavedViewpoint(viewpointObj) {
+  if (!viewerInstance || !viewpointObj) return;
+  const THREE = window.THREE;
+
+  if (viewpointObj.customCamera) {
+    const { position, target } = viewpointObj.customCamera;
+    if (Array.isArray(position) && Array.isArray(target)) {
+      animateCameraTransition(
+        new THREE.Vector3(position[0], position[1], position[2]),
+        new THREE.Vector3(target[0], target[1], target[2]),
+        300
+      );
+      return;
+    }
+  }
+
+  if (viewpointObj.state) {
+    viewerInstance.restoreState(viewpointObj.state);
+  }
 }
 
 export function deleteSavedViewpoint(viewpointId, modelId = getActiveModelIdForViewpoints()) {
-  const list = getSavedViewpoints(modelId).filter((vp) => vp.id !== viewpointId);
-  localStorage.setItem(VIEWPOINTS_STORAGE_PREFIX + modelId, JSON.stringify(list));
+  const existing = getSavedViewpoints(modelId);
+  const filtered = existing.filter((v) => v.id !== viewpointId);
+  localStorage.setItem(VIEWPOINTS_STORAGE_PREFIX + modelId, JSON.stringify(filtered));
+  return filtered;
 }
