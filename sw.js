@@ -12,8 +12,8 @@
  *    langsung dari IndexedDB (NWDViewerOfflineDB).
  */
 
-const CACHE_SHELL = 'nwd-viewer-shell-v7';
-const CACHE_SDK = 'nwd-viewer-sdk-v7';
+const CACHE_SHELL = 'nwd-viewer-shell-v8';
+const CACHE_SDK = 'nwd-viewer-sdk-v8';
 
 const DB_NAME = 'NWDViewerOfflineDB';
 const DB_VERSION = 1;

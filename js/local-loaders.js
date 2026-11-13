@@ -28,12 +28,23 @@
  */
 export function computeVertexNormals(positions, indices) {
   const normals = new Float32Array(positions.length);
+  const floatLen = positions.length;
 
   if (indices && indices.length >= 3) {
-    for (let i = 0; i < indices.length; i += 3) {
+    for (let i = 0; i <= indices.length - 3; i += 3) {
       const i0 = indices[i] * 3;
       const i1 = indices[i + 1] * 3;
       const i2 = indices[i + 2] * 3;
+      if (
+        i0 < 0 ||
+        i1 < 0 ||
+        i2 < 0 ||
+        i0 + 2 >= floatLen ||
+        i1 + 2 >= floatLen ||
+        i2 + 2 >= floatLen
+      ) {
+        continue;
+      }
 
       const ax = positions[i0],
         ay = positions[i0 + 1],
@@ -55,6 +66,7 @@ export function computeVertexNormals(positions, indices) {
       const nx = aby * acz - abz * acy;
       const ny = abz * acx - abx * acz;
       const nz = abx * acy - aby * acx;
+      if (!Number.isFinite(nx) || !Number.isFinite(ny) || !Number.isFinite(nz)) continue;
 
       normals[i0] += nx;
       normals[i0 + 1] += ny;
@@ -67,7 +79,7 @@ export function computeVertexNormals(positions, indices) {
       normals[i2 + 2] += nz;
     }
   } else {
-    for (let i = 0; i < positions.length; i += 9) {
+    for (let i = 0; i <= floatLen - 9; i += 9) {
       const ax = positions[i],
         ay = positions[i + 1],
         az = positions[i + 2];
@@ -88,6 +100,7 @@ export function computeVertexNormals(positions, indices) {
       const nx = aby * acz - abz * acy;
       const ny = abz * acx - abx * acz;
       const nz = abx * acy - aby * acx;
+      if (!Number.isFinite(nx) || !Number.isFinite(ny) || !Number.isFinite(nz)) continue;
 
       for (let k = 0; k < 9; k += 3) {
         normals[i + k] = nx;
@@ -97,15 +110,21 @@ export function computeVertexNormals(positions, indices) {
     }
   }
 
-  // Normalisasi panjang vektor normal
-  for (let i = 0; i < normals.length; i += 3) {
+  // Normalisasi panjang vektor normal (dengan fallback aman (0, 1, 0) agar tidak NaN)
+  for (let i = 0; i <= normals.length - 3; i += 3) {
     const x = normals[i],
       y = normals[i + 1],
       z = normals[i + 2];
-    const len = Math.hypot(x, y, z) || 1;
-    normals[i] = x / len;
-    normals[i + 1] = y / len;
-    normals[i + 2] = z / len;
+    const len = Math.hypot(x, y, z);
+    if (!Number.isFinite(len) || len < 1e-12) {
+      normals[i] = 0;
+      normals[i + 1] = 1;
+      normals[i + 2] = 0;
+    } else {
+      normals[i] = x / len;
+      normals[i + 1] = y / len;
+      normals[i + 2] = z / len;
+    }
   }
 
   return normals;
@@ -1136,99 +1155,150 @@ export function getFreeAutodeskViewerExtractorScript() {
   const instanceMatrices = [];
   let extractedCount = 0;
 
+  function isValidCoord(v) {
+    return Number.isFinite(v) && Math.abs(v) < 1e8;
+  }
+
   function extractUniqueGeometry(geom) {
     if (!geom || geom.isLines || geom.isWideLines || geom.isPoints) return -1;
 
-    const rawVerts = [];
-    const rawTris = [];
+    const compactVerts = [];
+    const compactIdxList = [];
+    const indexRemap = new Map();
+    let nextV = 0;
 
-    if (VE && typeof VE.enumMeshVertices === "function" && typeof VE.enumMeshIndices === "function") {
+    function pushTriangle(ax, ay, az, bx, by, bz, cx, cy, cz, iA, iB, iC) {
+      if (
+        !isValidCoord(ax) || !isValidCoord(ay) || !isValidCoord(az) ||
+        !isValidCoord(bx) || !isValidCoord(by) || !isValidCoord(bz) ||
+        !isValidCoord(cx) || !isValidCoord(cy) || !isValidCoord(cz)
+      ) {
+        return;
+      }
+      if (iA === iB || iB === iC || iA === iC) return;
+
+      let mA = indexRemap.get(iA);
+      if (mA === undefined) {
+        mA = nextV++;
+        indexRemap.set(iA, mA);
+        compactVerts.push(ax, ay, az);
+      }
+      let mB = indexRemap.get(iB);
+      if (mB === undefined) {
+        mB = nextV++;
+        indexRemap.set(iB, mB);
+        compactVerts.push(bx, by, bz);
+      }
+      let mC = indexRemap.get(iC);
+      if (mC === undefined) {
+        mC = nextV++;
+        indexRemap.set(iC, mC);
+        compactVerts.push(cx, cy, cz);
+      }
+      compactIdxList.push(mA, mB, mC);
+    }
+
+    // 1. Jalur Utama: VertexEnumerator.enumMeshTriangles (mendukung penuh SVF2 UNORM16, vblayout, offset, & groups)
+    if (VE && typeof VE.enumMeshTriangles === "function") {
       try {
-        VE.enumMeshVertices(geom, function(p) {
-          rawVerts.push(p.x, p.y, p.z);
-        });
-        VE.enumMeshIndices(geom, function(a, b, c) {
-          if (a !== b && b !== c && a !== c) {
-            rawTris.push(a, b, c);
-          }
+        VE.enumMeshTriangles(geom, function(vA, vB, vC, iA, iB, iC) {
+          pushTriangle(vA.x, vA.y, vA.z, vB.x, vB.y, vB.z, vC.x, vC.y, vC.z, iA, iB, iC);
         });
       } catch (e) {}
     }
 
-    if (rawVerts.length < 9) {
-      rawVerts.length = 0;
-      rawTris.length = 0;
-      let srcVb = null;
-      let stride = 3;
-      let offset = 0;
+    // 2. Fallback Manual jika enumMeshTriangles tidak tersedia atau mengembalikan 0 segitiga
+    if (compactIdxList.length < 3 || nextV < 3) {
+      compactVerts.length = 0;
+      compactIdxList.length = 0;
+      indexRemap.clear();
+      nextV = 0;
+
+      const attrs = geom.attributes || {};
+      const posAttr = (geom.vblayout && geom.vblayout.position) || attrs.position || null;
+      const isUnorm16 = Boolean(posAttr && posAttr.bytesPerItem === 2 && posAttr.itemSize === 4 && geom.vb);
+
+      let readPos = null;
       let vCount = 0;
-      if (geom.vb && geom.vbstride) {
-        srcVb = geom.vb;
-        stride = geom.vbstride;
-        offset = (geom.attributes && geom.attributes.position && geom.attributes.position.itemOffset) || 0;
+
+      if (isUnorm16) {
+        const u16 = new Uint16Array(geom.vb.buffer, geom.vb.byteOffset, geom.vb.length * 2);
+        const u16Stride = 2 * (geom.vbstride || 4);
+        vCount = Math.floor(geom.vb.length / (geom.vbstride || 4));
+        readPos = function(idx) {
+          const b = idx * u16Stride;
+          return [
+            u16[b] / 65535 - 0.5,
+            u16[b + 1] / 65535 - 0.5,
+            u16[b + 2] / 65535 - 0.5
+          ];
+        };
+      } else if (geom.vb && geom.vbstride) {
+        const srcVb = geom.vb;
+        const stride = geom.vbstride;
+        const offset = (posAttr && (posAttr.offset !== undefined ? posAttr.offset : posAttr.itemOffset)) || 0;
         vCount = Math.floor(srcVb.length / stride);
-      } else if (geom.attributes && geom.attributes.position && geom.attributes.position.array) {
-        srcVb = geom.attributes.position.array;
-        stride = geom.attributes.position.itemSize || 3;
-        offset = 0;
+        readPos = function(idx) {
+          const b = idx * stride + offset;
+          return [srcVb[b], srcVb[b + 1], srcVb[b + 2]];
+        };
+      } else if (posAttr && posAttr.array) {
+        const srcVb = posAttr.array;
+        const stride = posAttr.itemSize || 3;
         vCount = Math.floor(srcVb.length / stride);
+        readPos = function(idx) {
+          const b = idx * stride;
+          return [srcVb[b], srcVb[b + 1], srcVb[b + 2]];
+        };
       }
-      if (!srcVb || vCount < 3) return -1;
-      for (let i = 0; i < vCount; i++) {
-        const b = i * stride + offset;
-        rawVerts.push(srcVb[b] || 0, srcVb[b + 1] || 0, srcVb[b + 2] || 0);
-      }
-      const ib = geom.ib || geom.indices || (geom.attributes && geom.attributes.index && geom.attributes.index.array);
+
+      if (!readPos || vCount < 3) return -1;
+
+      const ib = geom.ib || geom.indices || (attrs.index && attrs.index.array) || null;
       if (ib && ib.length >= 3) {
-        for (let k = 0; k <= ib.length - 3; k += 3) {
-          rawTris.push(ib[k], ib[k + 1], ib[k + 2]);
+        const groups = (geom.groups && geom.groups.length > 0)
+          ? geom.groups
+          : [{ start: 0, count: ib.length, index: 0 }];
+        for (let g = 0; g < groups.length; g++) {
+          const start = groups[g].start || 0;
+          const end = Math.min(ib.length, start + (groups[g].count || ib.length));
+          const baseIdx = groups[g].index || 0;
+          for (let k = start; k <= end - 3; k += 3) {
+            const iA = baseIdx + ib[k];
+            const iB = baseIdx + ib[k + 1];
+            const iC = baseIdx + ib[k + 2];
+            if (iA < 0 || iB < 0 || iC < 0 || iA >= vCount || iB >= vCount || iC >= vCount) continue;
+            const pA = readPos(iA);
+            const pB = readPos(iB);
+            const pC = readPos(iC);
+            pushTriangle(pA[0], pA[1], pA[2], pB[0], pB[1], pB[2], pC[0], pC[1], pC[2], iA, iB, iC);
+          }
+        }
+      } else {
+        for (let k = 0; k <= vCount - 3; k += 3) {
+          const pA = readPos(k);
+          const pB = readPos(k + 1);
+          const pC = readPos(k + 2);
+          pushTriangle(pA[0], pA[1], pA[2], pB[0], pB[1], pB[2], pC[0], pC[1], pC[2], k, k + 1, k + 2);
         }
       }
     }
 
-    const totalRawV = Math.floor(rawVerts.length / 3);
-    if (totalRawV < 3) return -1;
+    if (nextV < 3 || compactIdxList.length < 3) return -1;
 
-    let posArr = null;
+    const posArr = new Float32Array(compactVerts);
     let idxArr = null;
     let isU16 = 0;
-
-    if (rawTris.length >= 3) {
-      const remap = new Int32Array(totalRawV);
-      remap.fill(-1);
-      const compactVerts = [];
-      const compactIndices = new Uint32Array(rawTris.length);
-      let nextV = 0;
-
-      for (let k = 0; k < rawTris.length; k++) {
-        const origV = rawTris[k];
-        if (origV < 0 || origV >= totalRawV) continue;
-        let mapped = remap[origV];
-        if (mapped === -1) {
-          const base = origV * 3;
-          compactVerts.push(rawVerts[base], rawVerts[base + 1], rawVerts[base + 2]);
-          mapped = nextV++;
-          remap[origV] = mapped;
-        }
-        compactIndices[k] = mapped;
-      }
-
-      if (nextV < 3) return -1;
-      posArr = new Float32Array(compactVerts);
-      if (nextV <= 65535) {
-        isU16 = 1;
-        idxArr = new Uint16Array(compactIndices.length);
-        for (let k = 0; k < compactIndices.length; k++) idxArr[k] = compactIndices[k];
-      } else {
-        isU16 = 0;
-        idxArr = compactIndices;
-      }
+    if (nextV <= 65535) {
+      isU16 = 1;
+      idxArr = new Uint16Array(compactIdxList);
     } else {
-      posArr = new Float32Array(rawVerts);
+      isU16 = 0;
+      idxArr = new Uint32Array(compactIdxList);
     }
 
     const finalVCount = Math.floor(posArr.length / 3);
-    const finalICount = idxArr ? idxArr.length : 0;
+    const finalICount = idxArr.length;
     const gIdx = geomMetaList.length;
 
     geomMetaList.push({
@@ -1238,7 +1308,7 @@ export function getFreeAutodeskViewerExtractorScript() {
     });
 
     geomBinaryChunks.push(posArr.buffer);
-    if (idxArr && finalICount > 0) {
+    if (finalICount > 0) {
       geomBinaryChunks.push(idxArr.buffer);
       const rem = idxArr.byteLength % 4;
       if (rem !== 0) {
@@ -1256,7 +1326,8 @@ export function getFreeAutodeskViewerExtractorScript() {
     const geom = fragList.getGeometry ? fragList.getGeometry(fragId) : (fragList.getVizmesh(fragId) && fragList.getVizmesh(fragId).geometry);
     if (!geom || geom.isLines || geom.isWideLines || geom.isPoints) continue;
 
-    const geomKey = (fragList.getGeometryId && !fragList.useThreeMesh) ? fragList.getGeometryId(fragId) : geom;
+    const rawGeomId = (fragList.getGeometryId && !fragList.useThreeMesh) ? fragList.getGeometryId(fragId) : 0;
+    const geomKey = (typeof rawGeomId === "number" && rawGeomId > 0) ? rawGeomId : geom;
     let gIdx = geomKeyToIndex.get(geomKey);
     if (gIdx === undefined) {
       gIdx = extractUniqueGeometry(geom);
@@ -1264,8 +1335,11 @@ export function getFreeAutodeskViewerExtractorScript() {
     }
     if (gIdx === -1) continue;
 
+    mat4.identity();
     fragList.getWorldMatrix(fragId, mat4);
     const me = mat4.elements;
+    const matValid = Number.isFinite(me[0]) && Number.isFinite(me[12]) && Number.isFinite(me[13]) && Number.isFinite(me[14]);
+    if (!matValid) continue;
     instanceMatrices.push(
       me[0], me[1], me[2],
       me[4], me[5], me[6],

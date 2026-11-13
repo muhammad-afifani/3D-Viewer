@@ -1358,8 +1358,10 @@ async function buildCustomParsedMeshScene(viewer, modelName, meshItems) {
     return buildInstancedSceneFromNwdbV2(viewer, modelName, meshItems);
   }
 
-  // TAHAP 1: Validasi setiap mesh & hitung bounding box mentah masing-masing part
+  // TAHAP 1: Validasi setiap mesh, filter koordinat korup (>1e8) / index out-of-bounds, & hitung bbox presisi
+  const MAX_ABS_COORD = 1e8;
   const validItems = [];
+  let corruptedCount = 0;
 
   for (let i = 0; i < meshItems.length; i++) {
     const item = meshItems[i];
@@ -1372,22 +1374,101 @@ async function buildCustomParsedMeshScene(viewer, modelName, meshItems) {
 
     if (item.indices && item.indices.length >= 3) {
       if (vertCount <= 65535) {
-        // Pertahankan Indexed BufferGeometry (Uint16Array) — hemat RAM hingga 6x lipat!
-        indexU16 =
-          item.indices instanceof Uint16Array
-            ? item.indices
-            : new Uint16Array(item.indices);
-      } else {
-        // Hanya expand jika 1 mesh tunggal memiliki > 65.535 vertex
-        const idxArr = item.indices;
-        const expandedPos = new Float32Array(idxArr.length * 3);
-        for (let k = 0; k < idxArr.length; k++) {
-          const vi = idxArr[k] * 3;
-          expandedPos[k * 3] = posFloats[vi] || 0;
-          expandedPos[k * 3 + 1] = posFloats[vi + 1] || 0;
-          expandedPos[k * 3 + 2] = posFloats[vi + 2] || 0;
+        const rawIdx = item.indices;
+        const triEnd = rawIdx.length - (rawIdx.length % 3);
+        let hasInvalidTri = false;
+
+        for (let k = 0; k < triEnd; k += 3) {
+          const a = rawIdx[k];
+          const b = rawIdx[k + 1];
+          const c = rawIdx[k + 2];
+          const ax = posFloats[a * 3], ay = posFloats[a * 3 + 1], az = posFloats[a * 3 + 2];
+          const bx = posFloats[b * 3], by = posFloats[b * 3 + 1], bz = posFloats[b * 3 + 2];
+          const cx = posFloats[c * 3], cy = posFloats[c * 3 + 1], cz = posFloats[c * 3 + 2];
+          if (
+            a >= vertCount || b >= vertCount || c >= vertCount ||
+            !Number.isFinite(ax) || !Number.isFinite(ay) || !Number.isFinite(az) ||
+            !Number.isFinite(bx) || !Number.isFinite(by) || !Number.isFinite(bz) ||
+            !Number.isFinite(cx) || !Number.isFinite(cy) || !Number.isFinite(cz) ||
+            Math.abs(ax) > MAX_ABS_COORD || Math.abs(ay) > MAX_ABS_COORD || Math.abs(az) > MAX_ABS_COORD ||
+            Math.abs(bx) > MAX_ABS_COORD || Math.abs(by) > MAX_ABS_COORD || Math.abs(bz) > MAX_ABS_COORD ||
+            Math.abs(cx) > MAX_ABS_COORD || Math.abs(cy) > MAX_ABS_COORD || Math.abs(cz) > MAX_ABS_COORD
+          ) {
+            hasInvalidTri = true;
+            break;
+          }
         }
-        posFloats = expandedPos;
+
+        if (!hasInvalidTri && rawIdx instanceof Uint16Array && rawIdx.length === triEnd) {
+          indexU16 = rawIdx;
+        } else if (!hasInvalidTri) {
+          indexU16 = new Uint16Array(triEnd);
+          for (let k = 0; k < triEnd; k++) indexU16[k] = rawIdx[k];
+        } else {
+          const cleanIdx = [];
+          for (let k = 0; k < triEnd; k += 3) {
+            const a = rawIdx[k];
+            const b = rawIdx[k + 1];
+            const c = rawIdx[k + 2];
+            if (a >= vertCount || b >= vertCount || c >= vertCount) continue;
+            const ax = posFloats[a * 3], ay = posFloats[a * 3 + 1], az = posFloats[a * 3 + 2];
+            const bx = posFloats[b * 3], by = posFloats[b * 3 + 1], bz = posFloats[b * 3 + 2];
+            const cx = posFloats[c * 3], cy = posFloats[c * 3 + 1], cz = posFloats[c * 3 + 2];
+            if (
+              !Number.isFinite(ax) || !Number.isFinite(ay) || !Number.isFinite(az) ||
+              !Number.isFinite(bx) || !Number.isFinite(by) || !Number.isFinite(bz) ||
+              !Number.isFinite(cx) || !Number.isFinite(cy) || !Number.isFinite(cz) ||
+              Math.abs(ax) > MAX_ABS_COORD || Math.abs(ay) > MAX_ABS_COORD || Math.abs(az) > MAX_ABS_COORD ||
+              Math.abs(bx) > MAX_ABS_COORD || Math.abs(by) > MAX_ABS_COORD || Math.abs(bz) > MAX_ABS_COORD ||
+              Math.abs(cx) > MAX_ABS_COORD || Math.abs(cy) > MAX_ABS_COORD || Math.abs(cz) > MAX_ABS_COORD
+            ) {
+              continue;
+            }
+            cleanIdx.push(a, b, c);
+          }
+          if (cleanIdx.length < 3) {
+            corruptedCount++;
+            continue;
+          }
+          indexU16 = new Uint16Array(cleanIdx);
+        }
+      } else {
+        // Mesh tunggal > 65.535 vertex: expand segitiga yang valid
+        const idxArr = item.indices;
+        const triEnd = idxArr.length - (idxArr.length % 3);
+        const maxExpand = Math.min(triEnd, 54000 * 3);
+        const expandedPos = [];
+        for (let k = 0; k < maxExpand; k += 3) {
+          const a = idxArr[k] * 3;
+          const b = idxArr[k + 1] * 3;
+          const c = idxArr[k + 2] * 3;
+          if (
+            a + 2 >= posFloats.length ||
+            b + 2 >= posFloats.length ||
+            c + 2 >= posFloats.length
+          ) {
+            continue;
+          }
+          const ax = posFloats[a], ay = posFloats[a + 1], az = posFloats[a + 2];
+          const bx = posFloats[b], by = posFloats[b + 1], bz = posFloats[b + 2];
+          const cx = posFloats[c], cy = posFloats[c + 1], cz = posFloats[c + 2];
+          if (
+            !Number.isFinite(ax) || !Number.isFinite(ay) || !Number.isFinite(az) ||
+            !Number.isFinite(bx) || !Number.isFinite(by) || !Number.isFinite(bz) ||
+            !Number.isFinite(cx) || !Number.isFinite(cy) || !Number.isFinite(cz) ||
+            Math.abs(ax) > MAX_ABS_COORD || Math.abs(ay) > MAX_ABS_COORD || Math.abs(az) > MAX_ABS_COORD ||
+            Math.abs(bx) > MAX_ABS_COORD || Math.abs(by) > MAX_ABS_COORD || Math.abs(bz) > MAX_ABS_COORD ||
+            Math.abs(cx) > MAX_ABS_COORD || Math.abs(cy) > MAX_ABS_COORD || Math.abs(cz) > MAX_ABS_COORD
+          ) {
+            continue;
+          }
+          expandedPos.push(ax, ay, az, bx, by, bz, cx, cy, cz);
+        }
+        if (expandedPos.length < 9) {
+          corruptedCount++;
+          continue;
+        }
+        posFloats = new Float32Array(expandedPos);
         normFloats = null;
       }
     }
@@ -1405,30 +1486,75 @@ async function buildCustomParsedMeshScene(viewer, modelName, meshItems) {
     let pMaxZ = -Infinity;
     let validVertexCount = 0;
 
-    for (let j = 0; j < validFloatLen; j += 3) {
-      const x = posFloats[j];
-      const y = posFloats[j + 1];
-      const z = posFloats[j + 2];
-      if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) {
-        posFloats[j] = 0;
-        posFloats[j + 1] = 0;
-        posFloats[j + 2] = 0;
-        continue;
+    if (indexU16) {
+      // Hitung Bounding Box HANYA dari vertex yang benar-benar dipakai oleh indexU16!
+      for (let k = 0; k < indexU16.length; k++) {
+        const j = indexU16[k] * 3;
+        const x = posFloats[j];
+        const y = posFloats[j + 1];
+        const z = posFloats[j + 2];
+        if (
+          !Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z) ||
+          Math.abs(x) > MAX_ABS_COORD || Math.abs(y) > MAX_ABS_COORD || Math.abs(z) > MAX_ABS_COORD
+        ) {
+          continue;
+        }
+        validVertexCount++;
+        if (x < pMinX) pMinX = x;
+        if (y < pMinY) pMinY = y;
+        if (z < pMinZ) pMinZ = z;
+        if (x > pMaxX) pMaxX = x;
+        if (y > pMaxY) pMaxY = y;
+        if (z > pMaxZ) pMaxZ = z;
       }
-      validVertexCount++;
-      if (x < pMinX) pMinX = x;
-      if (y < pMinY) pMinY = y;
-      if (z < pMinZ) pMinZ = z;
-      if (x > pMaxX) pMaxX = x;
-      if (y > pMaxY) pMaxY = y;
-      if (z > pMaxZ) pMaxZ = z;
+      // Pastikan seluruh slot di posFloats aman (tidak ada NaN/1e38) untuk computeBoundingBox Three.js
+      for (let j = 0; j < validFloatLen; j += 3) {
+        const x = posFloats[j], y = posFloats[j + 1], z = posFloats[j + 2];
+        if (
+          !Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z) ||
+          Math.abs(x) > MAX_ABS_COORD || Math.abs(y) > MAX_ABS_COORD || Math.abs(z) > MAX_ABS_COORD
+        ) {
+          posFloats[j] = pMinX !== Infinity ? pMinX : 0;
+          posFloats[j + 1] = pMinY !== Infinity ? pMinY : 0;
+          posFloats[j + 2] = pMinZ !== Infinity ? pMinZ : 0;
+        }
+      }
+    } else {
+      for (let j = 0; j < validFloatLen; j += 3) {
+        const x = posFloats[j];
+        const y = posFloats[j + 1];
+        const z = posFloats[j + 2];
+        if (
+          !Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z) ||
+          Math.abs(x) > MAX_ABS_COORD || Math.abs(y) > MAX_ABS_COORD || Math.abs(z) > MAX_ABS_COORD
+        ) {
+          posFloats[j] = 0;
+          posFloats[j + 1] = 0;
+          posFloats[j + 2] = 0;
+          continue;
+        }
+        validVertexCount++;
+        if (x < pMinX) pMinX = x;
+        if (y < pMinY) pMinY = y;
+        if (z < pMinZ) pMinZ = z;
+        if (x > pMaxX) pMaxX = x;
+        if (y > pMaxY) pMaxY = y;
+        if (z > pMaxZ) pMaxZ = z;
+      }
     }
 
-    if (validVertexCount < 3 || !Number.isFinite(pMinX)) continue;
+    if (validVertexCount < 3 || !Number.isFinite(pMinX)) {
+      corruptedCount++;
+      continue;
+    }
     const spanX = pMaxX - pMinX;
     const spanY = pMaxY - pMinY;
     const spanZ = pMaxZ - pMinZ;
     if (spanX < 1e-6 && spanY < 1e-6 && spanZ < 1e-6) continue;
+    if (spanX > 5e7 || spanY > 5e7 || spanZ > 5e7) {
+      corruptedCount++;
+      continue;
+    }
 
     validItems.push({
       item,
@@ -1445,15 +1571,21 @@ async function buildCustomParsedMeshScene(viewer, modelName, meshItems) {
         (pMinX + pMaxX) * 0.5,
         (pMinY + pMaxY) * 0.5,
         (pMinZ + pMaxZ) * 0.5
-      )
+      ),
+      rawSpan: Math.hypot(spanX, spanY, spanZ)
     });
   }
 
   if (validItems.length === 0) {
+    if (corruptedCount > 0) {
+      throw new Error(
+        'File .NWDJSON ini memakai format ekstraksi lama yang berisi vertex SVF2 terkuantisasi/rusak. Silakan salin ulang "Script Ekstraktor v2" di tab Cloud .NWD lalu ekstrak ulang dari viewer.autodesk.com (file baru juga 30x lebih kecil!).'
+      );
+    }
     throw new Error('Tidak ditemukan geometri 3D valid di dalam file.');
   }
 
-  // TAHAP 2: Georeferenced IFC Fix (Gunakan Median Center & Cluster Box agar titik (0,0,0) kosong tidak merusak pusat)
+  // TAHAP 2: Georeferenced IFC/NWD Fix (Gunakan Median Center & Q85 Core Cluster agar outlier/helper jauh tidak merusak kamera)
   const xs = validItems.map((v) => v.rawCenter.x).sort((a, b) => a - b);
   const ys = validItems.map((v) => v.rawCenter.y).sort((a, b) => a - b);
   const zs = validItems.map((v) => v.rawCenter.z).sort((a, b) => a - b);
@@ -1463,14 +1595,28 @@ async function buildCustomParsedMeshScene(viewer, modelName, meshItems) {
   const dists = validItems
     .map((v) => v.rawCenter.distanceTo(medianCenter))
     .sort((a, b) => a - b);
-  const p95Dist = dists[Math.floor(dists.length * 0.95)] || 100;
-  const clusterRadiusThreshold = Math.max(p95Dist * 6, 500);
+  const spans = validItems.map((v) => v.rawSpan).sort((a, b) => a - b);
+  const p85Dist = dists[Math.floor(dists.length * 0.85)] || 100;
+  const p85Span = spans[Math.floor(spans.length * 0.85)] || 50;
+  const clusterRadiusThreshold = Math.max(p85Dist * 3.5, p85Span * 12, 250);
+  const maxPartSpanThreshold = Math.max(p85Span * 25, 5000);
 
   const clusterBox = new THREE.Box3();
   for (const entry of validItems) {
-    if (entry.rawCenter.distanceTo(medianCenter) <= clusterRadiusThreshold) {
+    if (
+      entry.rawCenter.distanceTo(medianCenter) <= clusterRadiusThreshold &&
+      entry.rawSpan <= maxPartSpanThreshold
+    ) {
       clusterBox.expandByPoint(entry.rawMin);
       clusterBox.expandByPoint(entry.rawMax);
+    }
+  }
+  if (clusterBox.isEmpty()) {
+    for (const entry of validItems) {
+      if (entry.rawCenter.distanceTo(medianCenter) <= clusterRadiusThreshold) {
+        clusterBox.expandByPoint(entry.rawMin);
+        clusterBox.expandByPoint(entry.rawMax);
+      }
     }
   }
   if (clusterBox.isEmpty()) {
@@ -1495,12 +1641,21 @@ async function buildCustomParsedMeshScene(viewer, modelName, meshItems) {
     entry.rawMax.sub(worldCenterOffset);
     entry.rawCenter.sub(worldCenterOffset);
 
-    if (entry.rawCenter.length() <= clusterRadiusThreshold) {
+    if (
+      entry.rawCenter.length() <= clusterRadiusThreshold &&
+      entry.rawSpan <= maxPartSpanThreshold
+    ) {
       normalizedGlobalBox.expandByPoint(entry.rawMin);
       normalizedGlobalBox.expandByPoint(entry.rawMax);
     }
   }
 
+  if (normalizedGlobalBox.isEmpty()) {
+    for (const entry of validItems) {
+      normalizedGlobalBox.expandByPoint(entry.rawMin);
+      normalizedGlobalBox.expandByPoint(entry.rawMax);
+    }
+  }
   if (normalizedGlobalBox.isEmpty()) {
     normalizedGlobalBox.set(new THREE.Vector3(-10, -10, -10), new THREE.Vector3(10, 10, 10));
   }
@@ -1517,7 +1672,8 @@ async function buildCustomParsedMeshScene(viewer, modelName, meshItems) {
   // Material Pooling berdasarkan warna (colorHex) untuk menghemat memori GPU/CPU
   const materialPool = new Map();
   function getPooledMaterial(colorHex) {
-    const key = Number(colorHex || 0x38bdf8);
+    const parsedColor = Number(colorHex);
+    const key = Number.isFinite(parsedColor) && parsedColor > 0 ? parsedColor : 0x38bdf8;
     let mat = materialPool.get(key);
     if (!mat) {
       mat = new THREE.MeshPhongMaterial({
@@ -1533,87 +1689,49 @@ async function buildCustomParsedMeshScene(viewer, modelName, meshItems) {
   }
 
   const MAX_FLOATS_PER_CHUNK = 162000; // <= 54.000 vertex per chunk (aman untuk Uint16Array)
+  const origSceneUpdated = modelBuilder.sceneUpdated;
+  modelBuilder.sceneUpdated = () => {};
 
-  for (let i = 0; i < validItems.length; i++) {
-    const { item, posFloats, normFloats, indexU16, rawMin, rawMax } = validItems[i];
-    const dbId = Number(item.dbId || i + 1);
+  try {
+    for (let i = 0; i < validItems.length; i++) {
+      const { item, posFloats, normFloats, indexU16, rawMin, rawMax } = validItems[i];
+      const dbId = Number(item.dbId || i + 1);
 
-    const finalNormals =
-      normFloats && normFloats.length === posFloats.length
-        ? normFloats
-        : computeVertexNormals(posFloats, indexU16);
+      const finalNormals =
+        normFloats && normFloats.length === posFloats.length
+          ? normFloats
+          : computeVertexNormals(posFloats, indexU16);
 
-    const colorHex = item.colorHex || 0x38bdf8;
-    const mat = getPooledMaterial(colorHex);
+      const colorHex = item.colorHex || 0x38bdf8;
+      const mat = getPooledMaterial(colorHex);
 
-    const partBBox = new THREE.Box3(rawMin.clone(), rawMax.clone());
-    const partMeshes = [];
-    const partFragIds = [];
-    const partOrigMats = [];
+      const partBBox = new THREE.Box3(rawMin.clone(), rawMax.clone());
+      const partMeshes = [];
+      const partFragIds = [];
+      const partOrigMats = [];
 
-    if (indexU16) {
-      const bufGeom = new THREE.BufferGeometry();
-      const posAttr = new THREE.BufferAttribute(posFloats, 3);
-      const normAttr = new THREE.BufferAttribute(finalNormals, 3);
-      const idxAttr = new THREE.BufferAttribute(indexU16, 1);
-      idxAttr.bytesPerItem = 2;
-
-      if (typeof bufGeom.addAttribute === 'function') {
-        bufGeom.addAttribute('position', posAttr);
-        bufGeom.addAttribute('normal', normAttr);
-      } else if (typeof bufGeom.setAttribute === 'function') {
-        bufGeom.setAttribute('position', posAttr);
-        bufGeom.setAttribute('normal', normAttr);
-      }
-      if (typeof bufGeom.setIndex === 'function') {
-        bufGeom.setIndex(idxAttr);
-      } else {
-        bufGeom.index = idxAttr;
-      }
-
-      bufGeom.computeBoundingBox();
-      bufGeom.computeBoundingSphere();
-
-      const mesh = new THREE.Mesh(bufGeom, mat);
-      mesh.dbId = dbId;
-      mesh.PositionIsWorld = true;
-      mesh.matrixAutoUpdate = false;
-      mesh.updateMatrix();
-      mesh.updateMatrixWorld(true);
-
-      modelBuilder.addMesh(mesh);
-
-      partMeshes.push(mesh);
-      partOrigMats.push(mat);
-      if (mesh.fragId !== undefined) {
-        partFragIds.push(mesh.fragId);
-        fragIdToDbIdMap.set(mesh.fragId, dbId);
-      }
-    } else {
-      for (let offset = 0; offset < posFloats.length; offset += MAX_FLOATS_PER_CHUNK) {
-        const end = Math.min(offset + MAX_FLOATS_PER_CHUNK, posFloats.length);
-        const chunkPos =
-          offset === 0 && end === posFloats.length
-            ? posFloats
-            : posFloats.slice(offset, end);
-        const chunkNorm =
-          offset === 0 && end === finalNormals.length
-            ? finalNormals
-            : finalNormals.slice(offset, end);
-
+      if (indexU16) {
         const bufGeom = new THREE.BufferGeometry();
-        const posAttr = new THREE.BufferAttribute(chunkPos, 3);
-        const normAttr = new THREE.BufferAttribute(chunkNorm, 3);
+        const posAttr = new THREE.BufferAttribute(posFloats, 3);
+        const normAttr = new THREE.BufferAttribute(finalNormals, 3);
+        const idxAttr = new THREE.BufferAttribute(indexU16, 1);
+        idxAttr.bytesPerItem = 2;
 
-        if (typeof bufGeom.addAttribute === 'function') {
-          bufGeom.addAttribute('position', posAttr);
-          bufGeom.addAttribute('normal', normAttr);
-        } else if (typeof bufGeom.setAttribute === 'function') {
+        if (typeof bufGeom.setAttribute === 'function') {
           bufGeom.setAttribute('position', posAttr);
           bufGeom.setAttribute('normal', normAttr);
+        } else if (typeof bufGeom.addAttribute === 'function') {
+          bufGeom.addAttribute('position', posAttr);
+          bufGeom.addAttribute('normal', normAttr);
+        }
+        if (typeof bufGeom.setIndex === 'function') {
+          bufGeom.setIndex(idxAttr);
+        } else {
+          bufGeom.index = idxAttr;
         }
 
-        bufGeom.computeBoundingBox();
+        bufGeom.byteSize = posFloats.byteLength + finalNormals.byteLength + indexU16.byteLength;
+        bufGeom.boundingBox = partBBox.clone();
         bufGeom.computeBoundingSphere();
 
         const mesh = new THREE.Mesh(bufGeom, mat);
@@ -1631,48 +1749,95 @@ async function buildCustomParsedMeshScene(viewer, modelName, meshItems) {
           partFragIds.push(mesh.fragId);
           fragIdToDbIdMap.set(mesh.fragId, dbId);
         }
+      } else {
+        for (let offset = 0; offset < posFloats.length; offset += MAX_FLOATS_PER_CHUNK) {
+          const end = Math.min(offset + MAX_FLOATS_PER_CHUNK, posFloats.length);
+          const chunkPos =
+            offset === 0 && end === posFloats.length
+              ? posFloats
+              : posFloats.slice(offset, end);
+          const chunkNorm =
+            offset === 0 && end === finalNormals.length
+              ? finalNormals
+              : finalNormals.slice(offset, end);
+
+          const bufGeom = new THREE.BufferGeometry();
+          const posAttr = new THREE.BufferAttribute(chunkPos, 3);
+          const normAttr = new THREE.BufferAttribute(chunkNorm, 3);
+
+          if (typeof bufGeom.setAttribute === 'function') {
+            bufGeom.setAttribute('position', posAttr);
+            bufGeom.setAttribute('normal', normAttr);
+          } else if (typeof bufGeom.addAttribute === 'function') {
+            bufGeom.addAttribute('position', posAttr);
+            bufGeom.addAttribute('normal', normAttr);
+          }
+
+          bufGeom.byteSize = chunkPos.byteLength + chunkNorm.byteLength;
+          bufGeom.computeBoundingBox();
+          bufGeom.computeBoundingSphere();
+
+          const mesh = new THREE.Mesh(bufGeom, mat);
+          mesh.dbId = dbId;
+          mesh.PositionIsWorld = true;
+          mesh.matrixAutoUpdate = false;
+          mesh.updateMatrix();
+          mesh.updateMatrixWorld(true);
+
+          modelBuilder.addMesh(mesh);
+
+          partMeshes.push(mesh);
+          partOrigMats.push(mat);
+          if (mesh.fragId !== undefined) {
+            partFragIds.push(mesh.fragId);
+            fragIdToDbIdMap.set(mesh.fragId, dbId);
+          }
+        }
+      }
+
+      const existingPart = partRegistry.get(dbId);
+      if (existingPart) {
+        existingPart.bbox.union(partBBox);
+        existingPart.center = existingPart.bbox.getCenter(new THREE.Vector3());
+        existingPart.size = existingPart.bbox.getSize(new THREE.Vector3());
+        existingPart.fragIds.push(...partFragIds);
+        existingPart.meshes.push(...partMeshes);
+        existingPart.originalMaterials.push(...partOrigMats);
+      } else {
+        partRegistry.set(dbId, {
+          dbId,
+          name: item.name || `Component #${dbId}`,
+          category: item.category || '3D Elements',
+          system: item.system || modelName,
+          material: item.materialName || 'CAD Material',
+          colorHex,
+          specs: item.specs || {
+            'Element Name': item.name || `Component #${dbId}`,
+            Category: item.category || '3D Elements',
+            Triangles: String(
+              indexU16 ? Math.floor(indexU16.length / 3) : Math.floor(posFloats.length / 9)
+            )
+          },
+          bbox: partBBox,
+          center: partBBox.getCenter(new THREE.Vector3()),
+          size: partBBox.getSize(new THREE.Vector3()),
+          visible: true,
+          selected: false,
+          fragIds: partFragIds,
+          meshes: partMeshes,
+          originalMaterial: mat,
+          originalMaterials: partOrigMats,
+          highlightMaterial: null,
+          modelBuilder
+        });
       }
     }
-
-    const existingPart = partRegistry.get(dbId);
-    if (existingPart) {
-      existingPart.bbox.union(partBBox);
-      existingPart.center = existingPart.bbox.getCenter(new THREE.Vector3());
-      existingPart.size = existingPart.bbox.getSize(new THREE.Vector3());
-      existingPart.fragIds.push(...partFragIds);
-      existingPart.meshes.push(...partMeshes);
-      existingPart.originalMaterials.push(...partOrigMats);
-    } else {
-      partRegistry.set(dbId, {
-        dbId,
-        name: item.name || `Component #${dbId}`,
-        category: item.category || '3D Elements',
-        system: item.system || modelName,
-        material: item.materialName || 'CAD Material',
-        colorHex,
-        specs: item.specs || {
-          'Element Name': item.name || `Component #${dbId}`,
-          Category: item.category || '3D Elements',
-          Triangles: String(
-            indexU16 ? Math.floor(indexU16.length / 3) : Math.floor(posFloats.length / 9)
-          )
-        },
-        bbox: partBBox,
-        center: partBBox.getCenter(new THREE.Vector3()),
-        size: partBBox.getSize(new THREE.Vector3()),
-        visible: true,
-        selected: false,
-        fragIds: partFragIds,
-        meshes: partMeshes,
-        originalMaterial: mat,
-        originalMaterials: partOrigMats,
-        highlightMaterial: null,
-        modelBuilder
-      });
-    }
+  } finally {
+    modelBuilder.sceneUpdated = origSceneUpdated;
   }
 
   patchSceneBuilderInstanceTree(modelBuilder, modelName);
+  modelBuilder.sceneUpdated(true);
   fitToViewAll({ resetIso: true, immediate: true });
   notifyHierarchyChanged();
 
@@ -1687,6 +1852,7 @@ async function buildCustomParsedMeshScene(viewer, modelName, meshItems) {
 async function buildInstancedSceneFromNwdbV2(viewer, modelName, instancedData) {
   const THREE = window.THREE;
   const { sharedGeometries, instances } = instancedData;
+  const MAX_ABS_COORD = 1e8;
 
   // TAHAP 1: Siapkan THREE.BufferGeometry untuk setiap geometri unik HANYA 1 KALI
   const builtGeoms = new Array(sharedGeometries.length).fill(null);
@@ -1702,33 +1868,89 @@ async function buildInstancedSceneFromNwdbV2(viewer, modelName, instancedData) {
 
     if (sg.indices && sg.indices.length >= 3) {
       if (vCount <= 65535) {
-        idxU16 =
-          sg.indices instanceof Uint16Array ? sg.indices : new Uint16Array(sg.indices);
+        const rawIdx = sg.indices;
+        const triEnd = rawIdx.length - (rawIdx.length % 3);
+        let needsFilter = !(rawIdx instanceof Uint16Array) || rawIdx.length !== triEnd;
+        if (!needsFilter) {
+          for (let k = 0; k < triEnd; k++) {
+            if (rawIdx[k] >= vCount) {
+              needsFilter = true;
+              break;
+            }
+          }
+        }
+        if (!needsFilter) {
+          idxU16 = rawIdx;
+        } else {
+          const clean = [];
+          for (let k = 0; k < triEnd; k += 3) {
+            const a = rawIdx[k], b = rawIdx[k + 1], c = rawIdx[k + 2];
+            if (a < vCount && b < vCount && c < vCount) {
+              clean.push(a, b, c);
+            }
+          }
+          if (clean.length < 3) continue;
+          idxU16 = new Uint16Array(clean);
+        }
       } else {
         // Jika geometri tunggal > 65.535 vertex, un-index dan potong <= 54.000 vertex
-        const maxTriIndices = Math.min(sg.indices.length, 54000 * 3);
+        const triEnd = sg.indices.length - (sg.indices.length % 3);
+        const maxTriIndices = Math.min(triEnd, 54000 * 3);
         const expandedPos = new Float32Array(maxTriIndices * 3);
         for (let k = 0; k < maxTriIndices; k++) {
           const vi = sg.indices[k] * 3;
-          expandedPos[k * 3] = posFloats[vi] || 0;
-          expandedPos[k * 3 + 1] = posFloats[vi + 1] || 0;
-          expandedPos[k * 3 + 2] = posFloats[vi + 2] || 0;
+          if (vi >= 0 && vi + 2 < posFloats.length) {
+            const x = posFloats[vi], y = posFloats[vi + 1], z = posFloats[vi + 2];
+            if (Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(z) && Math.abs(x) < MAX_ABS_COORD) {
+              expandedPos[k * 3] = x;
+              expandedPos[k * 3 + 1] = y;
+              expandedPos[k * 3 + 2] = z;
+            }
+          }
         }
         posFloats = expandedPos;
       }
     }
+
+    const lBox = new THREE.Box3();
+    const tmpPt = new THREE.Vector3();
+    if (idxU16) {
+      for (let k = 0; k < idxU16.length; k++) {
+        const vi = idxU16[k] * 3;
+        const x = posFloats[vi], y = posFloats[vi + 1], z = posFloats[vi + 2];
+        if (
+          Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(z) &&
+          Math.abs(x) < MAX_ABS_COORD && Math.abs(y) < MAX_ABS_COORD && Math.abs(z) < MAX_ABS_COORD
+        ) {
+          tmpPt.set(x, y, z);
+          lBox.expandByPoint(tmpPt);
+        }
+      }
+    } else {
+      for (let k = 0; k <= posFloats.length - 3; k += 3) {
+        const x = posFloats[k], y = posFloats[k + 1], z = posFloats[k + 2];
+        if (
+          Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(z) &&
+          Math.abs(x) < MAX_ABS_COORD && Math.abs(y) < MAX_ABS_COORD && Math.abs(z) < MAX_ABS_COORD
+        ) {
+          tmpPt.set(x, y, z);
+          lBox.expandByPoint(tmpPt);
+        }
+      }
+    }
+    if (lBox.isEmpty()) continue;
 
     const normals = computeVertexNormals(posFloats, idxU16);
     const bufGeom = new THREE.BufferGeometry();
     const posAttr = new THREE.BufferAttribute(posFloats, 3);
     const normAttr = new THREE.BufferAttribute(normals, 3);
 
-    if (typeof bufGeom.addAttribute === 'function') {
-      bufGeom.addAttribute('position', posAttr);
-      bufGeom.addAttribute('normal', normAttr);
-    } else if (typeof bufGeom.setAttribute === 'function') {
+    if (typeof bufGeom.setAttribute === 'function') {
       bufGeom.setAttribute('position', posAttr);
       bufGeom.setAttribute('normal', normAttr);
+    } else if (typeof bufGeom.addAttribute === 'function') {
+      bufGeom.addAttribute('position', posAttr);
+      bufGeom.addAttribute('normal', normAttr);
     }
 
     if (idxU16) {
@@ -1741,13 +1963,12 @@ async function buildInstancedSceneFromNwdbV2(viewer, modelName, instancedData) {
       }
     }
 
-    bufGeom.computeBoundingBox();
+    bufGeom.byteSize = posFloats.byteLength + normals.byteLength + (idxU16 ? idxU16.byteLength : 0);
+    bufGeom.boundingBox = lBox.clone();
     bufGeom.computeBoundingSphere();
 
-    if (!bufGeom.boundingBox || bufGeom.boundingBox.isEmpty()) continue;
-
     builtGeoms[g] = bufGeom;
-    localBoxes[g] = bufGeom.boundingBox.clone();
+    localBoxes[g] = lBox;
   }
 
   // TAHAP 2: Hitung World Matrix & Bounding Box setiap instance untuk normalisasi pusat (0,0,0)
@@ -1772,18 +1993,22 @@ async function buildInstancedSceneFromNwdbV2(viewer, modelName, instancedData) {
     if (
       !Number.isFinite(worldBox.min.x) ||
       !Number.isFinite(worldBox.max.x) ||
+      Math.abs(worldBox.min.x) > MAX_ABS_COORD ||
+      Math.abs(worldBox.max.x) > MAX_ABS_COORD ||
       worldBox.isEmpty()
     ) {
       continue;
     }
 
     const worldCenter = worldBox.getCenter(new THREE.Vector3());
+    const worldSpan = worldBox.getSize(new THREE.Vector3()).length();
     validInstances.push({
       inst,
       bufGeom,
       mat4,
       worldBox,
-      worldCenter
+      worldCenter,
+      worldSpan
     });
   }
 
@@ -1791,7 +2016,7 @@ async function buildInstancedSceneFromNwdbV2(viewer, modelName, instancedData) {
     throw new Error('Tidak ditemukan instance geometri 3D yang valid di dalam paket NWDB v2.');
   }
 
-  // Hitung Median Cluster Center untuk menggeser model ke pusat (0, 0, 0)
+  // Hitung Median Cluster Center (Q85) untuk menggeser model ke pusat (0, 0, 0)
   const xs = validInstances.map((v) => v.worldCenter.x).sort((a, b) => a - b);
   const ys = validInstances.map((v) => v.worldCenter.y).sort((a, b) => a - b);
   const zs = validInstances.map((v) => v.worldCenter.z).sort((a, b) => a - b);
@@ -1801,13 +2026,26 @@ async function buildInstancedSceneFromNwdbV2(viewer, modelName, instancedData) {
   const dists = validInstances
     .map((v) => v.worldCenter.distanceTo(medianCenter))
     .sort((a, b) => a - b);
-  const p95Dist = dists[Math.floor(dists.length * 0.95)] || 100;
-  const clusterRadiusThreshold = Math.max(p95Dist * 6, 500);
+  const spans = validInstances.map((v) => v.worldSpan).sort((a, b) => a - b);
+  const p85Dist = dists[Math.floor(dists.length * 0.85)] || 100;
+  const p85Span = spans[Math.floor(spans.length * 0.85)] || 50;
+  const clusterRadiusThreshold = Math.max(p85Dist * 3.5, p85Span * 12, 250);
+  const maxPartSpanThreshold = Math.max(p85Span * 25, 5000);
 
   const clusterBox = new THREE.Box3();
   for (const entry of validInstances) {
-    if (entry.worldCenter.distanceTo(medianCenter) <= clusterRadiusThreshold) {
+    if (
+      entry.worldCenter.distanceTo(medianCenter) <= clusterRadiusThreshold &&
+      entry.worldSpan <= maxPartSpanThreshold
+    ) {
       clusterBox.union(entry.worldBox);
+    }
+  }
+  if (clusterBox.isEmpty()) {
+    for (const entry of validInstances) {
+      if (entry.worldCenter.distanceTo(medianCenter) <= clusterRadiusThreshold) {
+        clusterBox.union(entry.worldBox);
+      }
     }
   }
   if (clusterBox.isEmpty()) {
@@ -1830,11 +2068,19 @@ async function buildInstancedSceneFromNwdbV2(viewer, modelName, instancedData) {
     entry.worldBox.max.sub(worldCenterOffset);
     entry.worldCenter.sub(worldCenterOffset);
 
-    if (entry.worldCenter.length() <= clusterRadiusThreshold) {
+    if (
+      entry.worldCenter.length() <= clusterRadiusThreshold &&
+      entry.worldSpan <= maxPartSpanThreshold
+    ) {
       normalizedGlobalBox.union(entry.worldBox);
     }
   }
 
+  if (normalizedGlobalBox.isEmpty()) {
+    for (const entry of validInstances) {
+      normalizedGlobalBox.union(entry.worldBox);
+    }
+  }
   if (normalizedGlobalBox.isEmpty()) {
     normalizedGlobalBox.set(new THREE.Vector3(-10, -10, -10), new THREE.Vector3(10, 10, 10));
   }
@@ -1850,7 +2096,8 @@ async function buildInstancedSceneFromNwdbV2(viewer, modelName, instancedData) {
 
   const materialPool = new Map();
   function getPooledMaterial(colorHex) {
-    const key = Number(colorHex || 0x38bdf8);
+    const parsedColor = Number(colorHex);
+    const key = Number.isFinite(parsedColor) && parsedColor > 0 ? parsedColor : 0x38bdf8;
     let mat = materialPool.get(key);
     if (!mat) {
       mat = new THREE.MeshPhongMaterial({
@@ -1865,58 +2112,66 @@ async function buildInstancedSceneFromNwdbV2(viewer, modelName, instancedData) {
     return mat;
   }
 
-  for (let i = 0; i < validInstances.length; i++) {
-    const { inst, bufGeom, mat4, worldBox } = validInstances[i];
-    const dbId = Number(inst.dbId || i + 1);
-    const mat = getPooledMaterial(inst.colorHex);
+  const origSceneUpdated = modelBuilder.sceneUpdated;
+  modelBuilder.sceneUpdated = () => {};
 
-    const mesh = new THREE.Mesh(bufGeom, mat);
-    mesh.dbId = dbId;
-    mesh.PositionIsWorld = false;
-    mesh.matrixAutoUpdate = false;
-    mesh.matrix.copy(mat4);
-    mesh.matrixWorld.copy(mat4);
+  try {
+    for (let i = 0; i < validInstances.length; i++) {
+      const { inst, bufGeom, mat4, worldBox } = validInstances[i];
+      const dbId = Number(inst.dbId || i + 1);
+      const mat = getPooledMaterial(inst.colorHex);
 
-    modelBuilder.addMesh(mesh);
+      const mesh = new THREE.Mesh(bufGeom, mat);
+      mesh.dbId = dbId;
+      mesh.PositionIsWorld = false;
+      mesh.matrixAutoUpdate = false;
+      mesh.matrix.copy(mat4);
+      mesh.matrixWorld.copy(mat4);
 
-    const fragId = mesh.fragId;
-    if (fragId !== undefined) {
-      fragIdToDbIdMap.set(fragId, dbId);
+      modelBuilder.addMesh(mesh);
+
+      const fragId = mesh.fragId;
+      if (fragId !== undefined) {
+        fragIdToDbIdMap.set(fragId, dbId);
+      }
+
+      const existingPart = partRegistry.get(dbId);
+      if (existingPart) {
+        existingPart.bbox.union(worldBox);
+        existingPart.center = existingPart.bbox.getCenter(new THREE.Vector3());
+        existingPart.size = existingPart.bbox.getSize(new THREE.Vector3());
+        if (fragId !== undefined) existingPart.fragIds.push(fragId);
+        existingPart.meshes.push(mesh);
+        existingPart.originalMaterials.push(mat);
+      } else {
+        partRegistry.set(dbId, {
+          dbId,
+          name: inst.name || `Component #${dbId}`,
+          category: inst.category || 'Navisworks Element',
+          system: inst.system || modelName,
+          material: inst.materialName || 'Navisworks Material',
+          colorHex: inst.colorHex || 0x38bdf8,
+          specs: inst.specs || {},
+          bbox: worldBox.clone(),
+          center: worldBox.getCenter(new THREE.Vector3()),
+          size: worldBox.getSize(new THREE.Vector3()),
+          visible: true,
+          selected: false,
+          fragIds: fragId !== undefined ? [fragId] : [],
+          meshes: [mesh],
+          originalMaterial: mat,
+          originalMaterials: [mat],
+          highlightMaterial: null,
+          modelBuilder
+        });
+      }
     }
-
-    const existingPart = partRegistry.get(dbId);
-    if (existingPart) {
-      existingPart.bbox.union(worldBox);
-      existingPart.center = existingPart.bbox.getCenter(new THREE.Vector3());
-      existingPart.size = existingPart.bbox.getSize(new THREE.Vector3());
-      if (fragId !== undefined) existingPart.fragIds.push(fragId);
-      existingPart.meshes.push(mesh);
-      existingPart.originalMaterials.push(mat);
-    } else {
-      partRegistry.set(dbId, {
-        dbId,
-        name: inst.name || `Component #${dbId}`,
-        category: inst.category || 'Navisworks Element',
-        system: inst.system || modelName,
-        material: inst.materialName || 'Navisworks Material',
-        colorHex: inst.colorHex || 0x38bdf8,
-        specs: inst.specs || {},
-        bbox: worldBox.clone(),
-        center: worldBox.getCenter(new THREE.Vector3()),
-        size: worldBox.getSize(new THREE.Vector3()),
-        visible: true,
-        selected: false,
-        fragIds: fragId !== undefined ? [fragId] : [],
-        meshes: [mesh],
-        originalMaterial: mat,
-        originalMaterials: [mat],
-        highlightMaterial: null,
-        modelBuilder
-      });
-    }
+  } finally {
+    modelBuilder.sceneUpdated = origSceneUpdated;
   }
 
   patchSceneBuilderInstanceTree(modelBuilder, modelName);
+  modelBuilder.sceneUpdated(true);
   fitToViewAll({ resetIso: true, immediate: true });
   notifyHierarchyChanged();
 
@@ -2748,14 +3003,17 @@ export function applyViewerTheme(theme) {
   if (!viewerInstance) return;
 
   if (theme === 'light') {
-    viewerInstance.setBackgroundColor(238, 242, 246, 203, 213, 225);
     viewerInstance.setLightPreset(4);
+    viewerInstance.setEnvMapBackground?.(false);
+    viewerInstance.setBackgroundColor(238, 242, 246, 203, 213, 225);
   } else if (theme === 'sky') {
-    viewerInstance.setBackgroundColor(135, 185, 228, 226, 236, 245);
     viewerInstance.setLightPreset(7);
+    viewerInstance.setEnvMapBackground?.(false);
+    viewerInstance.setBackgroundColor(135, 185, 228, 226, 236, 245);
   } else {
-    viewerInstance.setBackgroundColor(16, 23, 36, 8, 12, 20);
     viewerInstance.setLightPreset(1);
+    viewerInstance.setEnvMapBackground?.(false);
+    viewerInstance.setBackgroundColor(16, 23, 36, 8, 12, 20);
   }
 }
 
